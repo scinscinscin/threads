@@ -1,0 +1,26 @@
+{
+  "name": "threads",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "example": "tsx src/index.ts example_program.lol",
+    "demo": "tsx src/index.ts concurrency_demo.lol",
+    "typecheck": "tsc --noEmit",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "@scinorandex/slex": "^0.2.1",
+    "@scinorandex/sparse": "^0.2.0"
+  }
+}
