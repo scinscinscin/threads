@@ -1,4 +1,4 @@
-import type { StatementNode } from "./parser";
+import { StatementNode } from "./parser/nodes/statements";
 import { NullValue, PromiseValue, Value, print_fn, resolve_fn } from "./value";
 
 export class Environment {
@@ -57,6 +57,30 @@ export class CallFrame {
   }
 }
 
+/**
+ * Frame for a loop body. When the statement list is exhausted the counter rewinds
+ * to `rewind_index` so the iteration runs again; the loop only ends when the
+ * condition check finishes the frame ("end_frame"). `continue` jumps `counter`
+ * to `continue_index` and re-enters through the normal frame machinery.
+ */
+export class LoopFrame extends CallFrame {
+  public constructor(
+    statements: StatementNode[],
+    environment: Environment,
+    is_async_context: boolean,
+    public readonly rewind_index: number,
+    public readonly continue_index: number,
+    public readonly label: string | null,
+  ) {
+    super(statements, environment, is_async_context);
+  }
+
+  next_statement(): StatementNode | null {
+    if (this.counter >= this.statements.length) this.counter = this.rewind_index;
+    return this.statements[this.counter++];
+  }
+}
+
 export type ThreadStatus = "not_blocked" | "blocked" | "blocked_on_internal_promise" | "finished";
 
 export class Thread {
@@ -95,7 +119,11 @@ export class Thread {
   }
 }
 
-type StatementOutcome = { kind: "ok" } | { kind: "return"; value: Value } | { kind: "suspended" };
+type StatementOutcome =
+  | { kind: "ok" }
+  | { kind: "return"; value: Value }
+  | { kind: "suspended" }
+  | { kind: "end_frame" };
 
 export class Interpreter {
   public global_environment: Environment;
@@ -175,20 +203,26 @@ export class Interpreter {
       // Reached the end of the call frame, return with a null value
       if (stmt === null) return this.finish_frame(thread, frame, new NullValue());
 
-      const result = stmt.eval(thread, frame, this);
+      const result = stmt.execute(thread, frame, this);
       if (result.kind === "return") {
-        // roll back the callframe to one that captures returns
-        let target = frame;
-        while (!target.captures_return) target = target.parent!;
-
-        this.finish_frame(thread, target, result.value);
+        this.complete_return(thread, frame, result.value);
         return;
+      } else if (result.kind === "end_frame") {
+        // a loop's condition check said "stop iterating"; finish the loop frame normally
+        return this.finish_frame(thread, frame, new NullValue());
       } else if (result.kind === "suspended") return;
     }
   }
 
+  /** Roll back to the innermost frame that captures returns and finish it with the given value. */
+  public complete_return(thread: Thread, from_frame: CallFrame, value: Value): void {
+    let target = from_frame;
+    while (!target.captures_return) target = target.parent!;
+    this.finish_frame(thread, target, value);
+  }
+
   // called whenever a callframe is returned
-  private finish_frame(thread: Thread, frame: CallFrame, value: Value): void {
+  public finish_frame(thread: Thread, frame: CallFrame, value: Value): void {
     const on_done = frame.on_frame_done;
     frame.on_frame_done = null;
     if (frame.parent !== null) thread.call_frame = frame.parent;

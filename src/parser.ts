@@ -2,278 +2,134 @@ import { buildProductions, Sparse } from "@scinorandex/sparse";
 import fs from "fs";
 import path from "path";
 import { generate_lexer, Metadata, Token, TokenType } from "./lexer";
+
+import { BaseNode, ListNode, ProgramNode } from "./parser/nodes/base";
 import {
-  BooleanValue,
-  BuiltInAsyncFunctionValue,
-  BuiltInFunctionValue,
-  FunctionValue,
-  NumberValue,
-  PromiseValue,
-  StringValue,
-  Value,
-} from "./value";
-import { CallFrame, Interpreter, Thread } from "./interpreter";
-
-abstract class BaseNode {}
-
-export class ListNode<T> extends BaseNode {
-  constructor(private readonly items: T[]) {
-    super();
-  }
-
-  add(node: T) {
-    this.items.push(node);
-    return this;
-  }
-
-  get_items() {
-    return this.items;
-  }
-
-  get_items_reversed() {
-    return this.items.toReversed();
-  }
-}
-
-export class ProgramNode extends BaseNode {
-  constructor(public readonly statements: ListNode<StatementNode>) {
-    super();
-  }
-}
-
-type StatementOutcome = { kind: "ok" } | { kind: "return"; value: Value } | { kind: "suspended" };
-export abstract class StatementNode extends BaseNode {
-  abstract eval(thread: Thread, frame: CallFrame, interpreter: Interpreter): StatementOutcome;
-}
-
-export class BlockStatementNode extends StatementNode {
-  constructor(public readonly statements: ListNode<StatementNode>) {
-    super();
-  }
-
-  eval(thread: Thread, frame: CallFrame, interpreter: Interpreter): StatementOutcome {
-    const block_frame = new CallFrame(this.statements.get_items(), frame.environment.fork(), frame.is_async_context);
-    block_frame.parent = frame;
-    // `return` statements bypass the block frame
-    block_frame.captures_return = false;
-    thread.call_frame = block_frame;
-    interpreter.step_frame(thread);
-    return thread.suspended_or_ok();
-  }
-}
-
-export class FunctionDeclarationNode extends StatementNode {
-  constructor(
-    public readonly is_async: boolean,
-    public readonly identifier: Token,
-    public readonly params_list: ListNode<Token>,
-    public readonly body: BlockStatementNode,
-  ) {
-    super();
-  }
-
-  eval(thread: Thread, frame: CallFrame): StatementOutcome {
-    const name = this.identifier.lexeme;
-    const params = this.params_list.get_items().map((t) => t.lexeme);
-    const fn = new FunctionValue(name, frame.environment, this.is_async, params, this.body);
-    frame.environment.add_key(name, fn);
-
-    // atomic operation, no need to check if suspended
-    return { kind: "ok" };
-  }
-}
-
-export class VariableDeclarationNode extends StatementNode {
-  constructor(
-    public readonly variable_name: Token,
-    public readonly value: ExpressionNode,
-  ) {
-    super();
-  }
-
-  eval(thread: Thread, frame: CallFrame, interpreter: Interpreter): StatementOutcome {
-    const name = this.variable_name.lexeme;
-    this.value.eval(thread, frame, interpreter, (value) => frame.environment.add_key(name, value));
-    return thread.suspended_or_ok();
-  }
-}
-
-export class ReturnStatementNode extends StatementNode {
-  constructor(public readonly expression: ExpressionNode) {
-    super();
-  }
-
-  eval(thread: Thread, frame: CallFrame, interpreter: Interpreter): StatementOutcome {
-    let ret_value: Value | null = null;
-    this.expression.eval(thread, frame, interpreter, (value) => (ret_value = value));
-
-    // if the thread didn't become blocked while evaluating expression, can return the value immediately
-    if (thread.status === "not_blocked") return { kind: "return", value: ret_value! };
-    return { kind: "suspended" };
-  }
-}
-
-export class ExpressionStatementNode extends StatementNode {
-  constructor(public readonly expr: ExpressionNode) {
-    super();
-  }
-
-  eval(thread: Thread, frame: CallFrame, interpreter: Interpreter): StatementOutcome {
-    this.expr.eval(thread, frame, interpreter, () => {});
-    return thread.suspended_or_ok();
-  }
-}
-
-export abstract class ExpressionNode extends BaseNode {
-  abstract eval(thread: Thread, frame: CallFrame, interpreter: Interpreter, k: (value: Value) => void): void;
-}
-
-export class AwaitExpressionNode extends ExpressionNode {
-  constructor(public readonly expr: ExpressionNode) {
-    super();
-  }
-
-  eval(thread: Thread, frame: CallFrame, interpreter: Interpreter, k: (value: Value) => void): void {
-    this.expr.eval(thread, frame, interpreter, (promise_value) => {
-      if (!(promise_value instanceof PromiseValue)) k(promise_value);
-      // if the promise is already resolved then k can be called just fine
-      else if (promise_value.is_resolved()) k(promise_value.resolved!);
-      else {
-        if (!frame.is_async_context) throw new Error(`Await used in a non-async context`);
-        // Not resolved yet so mark the thread as blocked and add k to function to call when promise is resolved
-
-        thread.status = promise_value.internally_resolved ? "blocked_on_internal_promise" : "blocked";
-        thread.blocked_on = promise_value;
-        thread.pending = () => k(promise_value.resolved!);
-        promise_value.waiters.push(thread);
-      }
-    });
-  }
-}
-
-export class BinaryExpressionNode extends ExpressionNode {
-  constructor(
-    public readonly left: ExpressionNode,
-    public readonly op: Token,
-    public readonly right: ExpressionNode,
-  ) {
-    super();
-  }
-
-  eval(thread: Thread, frame: CallFrame, interpreter: Interpreter, k: (value: Value) => void): void {
-    this.left.eval(thread, frame, interpreter, (left) => {
-      this.right.eval(thread, frame, interpreter, (right) => {
-        k(this.apply_binary(left, this.op.type, right));
-      });
-    });
-  }
-
-  apply_binary(left: Value, op: TokenType, right: Value): Value {
-    if (op === TokenType.PLUS) {
-      if (left instanceof NumberValue && right instanceof NumberValue) return new NumberValue(left.value + right.value);
-      if (left instanceof StringValue && right instanceof StringValue) return new StringValue(left.value + right.value);
-      throw new Error(`Unsupported operands for "+": ${left.to_string()} and ${right.to_string()}`);
-    }
-
-    throw new Error(`Unsupported operator token: ${TokenType[op]}`);
-  }
-}
-
-export class LiteralExpressionNode extends ExpressionNode {
-  constructor(public readonly value: Token) {
-    super();
-  }
-
-  eval(thread: Thread, frame: CallFrame, interpreter: Interpreter, k: (value: Value) => void): void {
-    const token = this.value;
-    if (token.type === TokenType.NUMBER_LITERAL) k(new NumberValue(Number(token.lexeme)));
-    else if (token.type === TokenType.STRING_LITERAL) k(new StringValue(token.lexeme));
-    else if (token.type === TokenType.BOOLEAN_LITERAL) k(new BooleanValue(token.lexeme === "true"));
-    else throw new Error(`Unexpected literal token: ${TokenType[token.type]}`);
-  }
-}
-
-export class IdentifierExpressionNode extends ExpressionNode {
-  constructor(public readonly identifier: Token) {
-    super();
-  }
-
-  eval(thread: Thread, frame: CallFrame, interpreter: Interpreter, k: (value: Value) => void): void {
-    k(frame.environment.get(this.identifier.lexeme));
-  }
-}
-
-export class FunctionCallExpressionNode extends ExpressionNode {
-  constructor(
-    public readonly left: ExpressionNode,
-    public readonly args_list: ListNode<ExpressionNode>,
-  ) {
-    super();
-  }
-
-  eval(thread: Thread, frame: CallFrame, interpreter: Interpreter, k: (value: Value) => void): void {
-    const inside_exprs = this.args_list.get_items();
-
-    this.left.eval(thread, frame, interpreter, (callee) => {
-      const args: Value[] = [];
-
-      const eval_next_arg = (index: number): void => {
-        if (index >= inside_exprs.length) {
-          // reached the end of the argument list, call the function
-          if (callee instanceof BuiltInFunctionValue) {
-            k(callee.call(args, { thread, interpreter }));
-          } else if (callee instanceof BuiltInAsyncFunctionValue) {
-            callee.call(args, { thread, interpreter }, k);
-          } else if (callee instanceof FunctionValue) {
-            // Execute function call here, changing behaviour whether sync or async
-            callee.call(thread, frame, args, interpreter, k);
-          } else throw new Error(`Function value not callable: ${callee.to_string()}`);
-        } else {
-          inside_exprs[index].eval(thread, frame, interpreter, (arg) => {
-            args.push(arg);
-            eval_next_arg(index + 1);
-          });
-        }
-      };
-
-      eval_next_arg(0);
-    });
-  }
-}
+  BlockStatementNode,
+  BreakStatementNode,
+  ContinueStatementNode,
+  DoWhileStatementNode,
+  ExpressionStatementNode,
+  ForStatementNode,
+  IfStatementNode,
+  ReturnStatementNode,
+  StatementNode,
+  VariableDeclarationNode,
+  WhileStatementNode,
+} from "./parser/nodes/statements";
+import {
+  ArrayAccessExpressionNode,
+  ArrayLiteralExpressionNode,
+  AssignmentExpressionNode,
+  BinaryExpressionNode,
+  DotAccessExpressionNode,
+  ExpressionNode,
+  FunctionCallExpressionNode,
+  FunctionExpressionNode,
+  GroupingExpressionNode,
+  IdentifierExpressionNode,
+  LiteralExpressionNode,
+  ObjectLiteralExpressionNode,
+  ObjectPropertyNode,
+  UnaryExpressionNode,
+} from "./parser/nodes/expressions";
 
 type Reducer = (bag: any) => BaseNode;
+
+/** Statement productions from the new grammar that have no node implementations yet. */
+const not_implemented =
+  (name: string): Reducer =>
+  () => {
+    throw new Error(`${name}: not implemented yet`);
+  };
+
+const binary_level = (bag: { left: ExpressionNode; op?: Token; right?: ExpressionNode }): BaseNode =>
+  bag.op === undefined ? bag.left : new BinaryExpressionNode(bag.left, bag.op, bag.right!);
+
 const reducers = {
-  program: (bag: { stmts: ListNode<StatementNode> }) => new ProgramNode(bag.stmts),
+  program: (bag: { stmts?: ListNode<StatementNode> }) => new ProgramNode(bag.stmts ?? new ListNode<StatementNode>([])),
+
+  top_level_stmts: (bag: { stmt: StatementNode; rest?: ListNode<StatementNode> }) =>
+    new ListNode<StatementNode>([bag.stmt, ...(bag.rest?.get_items() ?? [])]),
+  top_level_stmt: (bag: { stmt: StatementNode }) => bag.stmt,
+  top_level_decl: (bag: { decl: StatementNode }) => bag.decl,
   stmts: (bag: { stmt: StatementNode; rest?: ListNode<StatementNode> }) =>
     new ListNode<StatementNode>([bag.stmt, ...(bag.rest?.get_items() ?? [])]),
-
   stmt: (bag: { stmt: StatementNode }) => bag.stmt,
+  decl: (bag: { decl: StatementNode }) => bag.decl,
+
   block_statement: (bag: { stmts?: ListNode<StatementNode> }) =>
     new BlockStatementNode(bag.stmts ?? new ListNode<StatementNode>([])),
-  fn_decl: (bag: { async_mod?: Token; name: Token; params_list?: ListNode<Token>; body: BlockStatementNode }) =>
-    new FunctionDeclarationNode(
-      bag.async_mod !== undefined,
-      bag.name,
-      bag.params_list ?? new ListNode<Token>([]),
-      bag.body,
-    ),
-
-  params_list: (bag: { parameter_name: Token; rest?: ListNode<Token> }) =>
-    new ListNode<Token>([bag.parameter_name, ...(bag.rest?.get_items() ?? [])]),
+  params_list: (bag: { param: Token; rest?: ListNode<Token> }) =>
+    new ListNode<Token>([bag.param, ...(bag.rest?.get_items() ?? [])]),
+  param: (bag: { parameter_name: Token }) => bag.parameter_name,
   var_decl: (bag: { variable_name: Token; value: ExpressionNode }) =>
     new VariableDeclarationNode(bag.variable_name, bag.value),
-  return_stmt: (bag: { expr: ExpressionNode }) => new ReturnStatementNode(bag.expr),
+  // for-loop initializer: same shape as var_decl but without the trailing semicolon
+  for_var_decl: (bag: { variable_name: Token; value: ExpressionNode }) =>
+    new VariableDeclarationNode(bag.variable_name, bag.value),
+  return_stmt: (bag: { expr?: ExpressionNode }) => new ReturnStatementNode(bag.expr ?? null),
   expr_stmt: (bag: { expr: ExpressionNode }) => new ExpressionStatementNode(bag.expr),
 
-  expression: (bag: { expr: ExpressionNode }) => bag.expr,
-  await_expr: (bag: { op?: Token; expr: ExpressionNode }) =>
-    bag.op === undefined ? bag.expr : new AwaitExpressionNode(bag.expr),
+  class_decl: not_implemented("class_decl"),
+  class_properties: not_implemented("class_properties"),
+  class_property: not_implemented("class_property"),
+  if_statement: (bag: { condition: ExpressionNode; then_body: StatementNode; else_body?: StatementNode }) =>
+    new IfStatementNode(bag.condition, bag.then_body, bag.else_body ?? null),
+  for_statement: (bag: {
+    label?: Token;
+    var_decl?: VariableDeclarationNode;
+    condition?: ExpressionNode;
+    update?: ExpressionNode;
+    body: StatementNode;
+  }) =>
+    new ForStatementNode(
+      bag.label?.lexeme ?? null,
+      bag.var_decl ?? null,
+      bag.condition ?? null,
+      bag.update ?? null,
+      bag.body,
+    ),
+  while_statement: (bag: { label?: Token; condition: ExpressionNode; body: StatementNode }) =>
+    new WhileStatementNode(bag.label?.lexeme ?? null, bag.condition, bag.body),
+  do_while_statement: (bag: { label?: Token; body: StatementNode; condition: ExpressionNode }) =>
+    new DoWhileStatementNode(bag.label?.lexeme ?? null, bag.body, bag.condition),
+  break_statement: (bag: { label?: Token }) => new BreakStatementNode(bag.label?.lexeme ?? null),
+  continue_statement: (bag: { label?: Token }) => new ContinueStatementNode(bag.label?.lexeme ?? null),
 
-  term_expr: (bag: { left: ExpressionNode; op?: Token; right?: ExpressionNode }) =>
-    bag.op === undefined ? bag.left : new BinaryExpressionNode(bag.left, bag.op, bag.right!),
+  expression: (bag: { expr: ExpressionNode }) => bag.expr,
+  or_expr: binary_level,
+  and_expr: binary_level,
+  equality_expr: binary_level,
+  relation_expr: binary_level,
+  additive_expr: binary_level,
+  multiplicative_expr: binary_level,
+  unary_expr: (bag: { op: Token; operand: ExpressionNode }) => new UnaryExpressionNode(bag.op, bag.operand),
   endpoint_expr: (bag: { expr: ExpressionNode }) => bag.expr,
-  literal_expr: (bag: { value: Token }) => new LiteralExpressionNode(bag.value),
+  literal_expr: (bag: { expr: ExpressionNode }) => bag.expr,
+
+  object_literal_expr: (bag: { object_properties: ListNode<ObjectPropertyNode> }) =>
+    new ObjectLiteralExpressionNode(bag.object_properties),
+  object_properties: (bag: { object_property: ObjectPropertyNode; rest?: ListNode<ObjectPropertyNode> }) =>
+    new ListNode<ObjectPropertyNode>([bag.object_property, ...(bag.rest?.get_items() ?? [])]),
+  object_property: (bag: { key: Token; value: ExpressionNode }) => new ObjectPropertyNode(bag.key, bag.value),
+
+  array_literal_expr: (bag: { array_properties?: ListNode<ExpressionNode> }) =>
+    new ArrayLiteralExpressionNode(bag.array_properties ?? new ListNode<ExpressionNode>([])),
+  array_properties: (bag: { expr: ExpressionNode; rest?: ListNode<ExpressionNode> }) =>
+    new ListNode<ExpressionNode>([bag.expr, ...(bag.rest?.get_items() ?? [])]),
+  primitive_literal_expr: (bag: { value: Token }) => new LiteralExpressionNode(bag.value),
+
+  function_expr: (bag: { async_mod?: Token; params_list?: ListNode<Token>; body: BlockStatementNode }) =>
+    new FunctionExpressionNode(bag.async_mod !== undefined, bag.params_list ?? new ListNode<Token>([]), bag.body),
+
+  assignment_expr: (bag: { identifier_expr: ExpressionNode; expr?: ExpressionNode }) =>
+    bag.expr === undefined ? bag.identifier_expr : new AssignmentExpressionNode(bag.identifier_expr, bag.expr),
   identifier_expr: (bag: { identifier: Token }) => new IdentifierExpressionNode(bag.identifier),
+  grouping_expr: (bag: { expr: ExpressionNode }) => new GroupingExpressionNode(bag.expr),
+  array_access_expr: (bag: { expr: ExpressionNode; index: ExpressionNode }) =>
+    new ArrayAccessExpressionNode(bag.expr, bag.index),
+  dot_access_expr: (bag: { expr: ExpressionNode; key: Token }) => new DotAccessExpressionNode(bag.expr, bag.key),
   function_call_expr: (bag: { expr: ExpressionNode; args_list?: ListNode<ExpressionNode> }) =>
     new FunctionCallExpressionNode(bag.expr, bag.args_list ?? new ListNode<ExpressionNode>([])),
   args_list: (bag: { expr: ExpressionNode; rest?: ListNode<ExpressionNode> }) =>
@@ -287,6 +143,7 @@ export function parse_program(source: string): ProgramNode {
   const parserGenerator = Sparse.fromProductions<TokenType, Metadata, BaseNode>({
     productions: buildProductions(GRAMMAR),
     toStringifiedTokenType: (type: TokenType) => TokenType[type],
+    conflicts: "shift",
   });
 
   const parser = parserGenerator.generate(generate_lexer(source), {

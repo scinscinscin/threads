@@ -1,8 +1,25 @@
 import { CallFrame, Environment, Interpreter, Thread } from "./interpreter";
-import type { BlockStatementNode } from "./parser";
+import { BlockStatementNode } from "./parser/nodes/statements";
 
 export abstract class Value {
   abstract to_string(): string;
+
+  /** Value equality for `==`/`!=`: primitives compare by value, everything else by reference identity. */
+  equals(other: Value): boolean {
+    if (this instanceof NumberValue) return other instanceof NumberValue && this.value === other.value;
+    if (this instanceof StringValue) return other instanceof StringValue && this.value === other.value;
+    if (this instanceof BooleanValue) return other instanceof BooleanValue && this.value === other.value;
+    if (this instanceof NullValue) return other instanceof NullValue;
+    return this === other;
+  }
+}
+
+/** Falsy values: null, false and 0; everything else is truthy. */
+export function is_truthy(value: Value): boolean {
+  if (value instanceof NullValue) return false;
+  if (value instanceof BooleanValue) return value.value;
+  if (value instanceof NumberValue) return value.value !== 0;
+  return true;
 }
 
 export class NumberValue extends Value {
@@ -38,6 +55,57 @@ export class BooleanValue extends Value {
 export class NullValue extends Value {
   to_string() {
     return "null";
+  }
+}
+
+export class ObjectValue extends Value {
+  private readonly properties: Map<string, Value>;
+
+  constructor(properties?: [string, Value][]) {
+    super();
+    this.properties = new Map(properties ?? []);
+  }
+
+  get(key: string): Value {
+    if (!this.properties.has(key)) throw new Error(`No value for key "${key}"`);
+    return this.properties.get(key)!;
+  }
+
+  set(key: string, value: Value): void {
+    this.properties.set(key, value);
+  }
+
+  to_string(): string {
+    const entries = [...this.properties.entries()].map(([k, v]) => `${k}: ${v.to_string()}`);
+    return `{${entries.join(", ")}}`;
+  }
+}
+
+export class ArrayValue extends Value {
+  private readonly items: Value[];
+
+  constructor(items?: Value[]) {
+    super();
+    this.items = [...(items ?? [])];
+  }
+
+  private check_index(index: number): void {
+    if (!Number.isInteger(index) || index < 0 || index >= this.items.length)
+      throw new Error(`Index ${index} out of bounds for array of length ${this.items.length}`);
+  }
+
+  get(index: number): Value {
+    this.check_index(index);
+    return this.items[index];
+  }
+
+  set(index: number, value: Value): void {
+    this.check_index(index);
+    this.items[index] = value;
+  }
+
+  to_string(): string {
+    return `[${this.items.map((v) => v.to_string()).join(", ")}]`;
   }
 }
 

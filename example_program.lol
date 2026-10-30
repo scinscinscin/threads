@@ -1,4 +1,4 @@
-async function first(){
+let first = async function (){
   print("Calling resolve() from first()");
   let a = resolve();
 
@@ -7,7 +7,7 @@ async function first(){
   print("After awaiting resolve()");
 
   return ret;
-}
+};
 
 print("The test is now starting");
 let tld = await first();
