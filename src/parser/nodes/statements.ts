@@ -1,9 +1,16 @@
 import { CallFrame, Interpreter, LoopFrame, Thread } from "../../interpreter";
 import { Token } from "../../lexer";
-import { create_binding, create_boolean_type, fresh_var, PolyType, TypeEnvironment } from "../../typechecker";
+import {
+  create_binding,
+  create_type,
+  get_fresh_counter_value,
+  fresh_var,
+  generalize,
+  TypeEnvironment,
+} from "../../typechecker";
 import { show_type, Term } from "../../typechecker/ast";
-import { apply_term, resolve, Substitution } from "../../typechecker/unify";
-import { FunctionValue, is_truthy, NullValue, Value } from "../../value";
+import { resolve, Substitution } from "../../typechecker/unify";
+import { is_truthy, NullValue, Value } from "../../value";
 import { BaseNode, ListNode } from "./base";
 import { ExpressionNode } from "./expressions";
 
@@ -83,8 +90,9 @@ export class VariableDeclarationNode extends StatementNode {
   typecheck(e: TypeEnvironment, sub: Substitution, r: Term): TypeEnvironment {
     // `let x;` starts as null at runtime but accepts any later assignment,
     // so it is typed with an unconstrained variable the first assignment pins
-    const type = this.value == null ? fresh_var() : this.value.infer(e, sub);
-    const poly: PolyType = { vars: [], type: apply_term(type, sub.fork()) };
+    const before = get_fresh_counter_value();
+    const variable_type = this.value == null ? fresh_var() : this.value.infer(e, sub);
+    const poly = generalize(variable_type, e, sub, before);
 
     const env2: TypeEnvironment = new Map(e);
     env2.set(this.variable_name.lexeme, create_binding(poly, true));
@@ -154,7 +162,7 @@ export class IfStatementNode extends StatementNode {
   }
 
   typecheck(e: TypeEnvironment, sub: Substitution, r: Term): TypeEnvironment {
-    this.condition.check(create_boolean_type(), e, sub);
+    this.condition.check(create_type("bool"), e, sub);
     this.then_body.typecheck(e, sub, r);
     if (this.else_body) this.else_body.typecheck(e, sub, r);
     return e;
@@ -182,7 +190,7 @@ class LoopConditionNode extends StatementNode {
   }
 
   typecheck(e: TypeEnvironment, sub: Substitution, r: Term): TypeEnvironment {
-    if (this.condition) this.condition.check(create_boolean_type(), e, sub);
+    if (this.condition) this.condition.check(create_type("bool"), e, sub);
     return e;
   }
 }
@@ -236,7 +244,7 @@ export class WhileStatementNode extends StatementNode {
   }
 
   typecheck(e: TypeEnvironment, sub: Substitution, r: Term): TypeEnvironment {
-    if (this.condition) this.condition.check(create_boolean_type(), e, sub);
+    if (this.condition) this.condition.check(create_type("bool"), e, sub);
     // the loop runs in a forked environment, so its variables do not leak out
     this.body.typecheck(new Map(e), sub, r);
     return e;
@@ -257,7 +265,7 @@ export class DoWhileStatementNode extends StatementNode {
   }
 
   typecheck(e: TypeEnvironment, sub: Substitution, r: Term): TypeEnvironment {
-    if (this.condition) this.condition.check(create_boolean_type(), e, sub);
+    if (this.condition) this.condition.check(create_type("bool"), e, sub);
     // the loop runs in a forked environment, so its variables do not leak out
     this.body.typecheck(new Map(e), sub, r);
     return e;
@@ -294,11 +302,27 @@ export class ForStatementNode extends StatementNode {
     // the loop runs in a forked environment, so its variables do not leak out
     let loop_env = new Map(e);
     if (this.init) loop_env = this.init.typecheck(loop_env, sub, r);
-    if (this.condition) this.condition.check(create_boolean_type(), loop_env, sub);
+    if (this.condition) this.condition.check(create_type("bool"), loop_env, sub);
     this.body.typecheck(loop_env, sub, r);
     if (this.update) this.update.infer(loop_env, sub);
     return e;
   }
+}
+
+/** True when `st` contains a return statement anywhere in its nested statements. */
+export function statement_has_return(st: StatementNode): boolean {
+  if (st instanceof ReturnStatementNode) return true;
+  if (st instanceof BlockStatementNode) return body_has_return(st);
+  if (st instanceof IfStatementNode)
+    return statement_has_return(st.then_body) || (st.else_body !== null && statement_has_return(st.else_body));
+  if (st instanceof WhileStatementNode || st instanceof DoWhileStatementNode) return statement_has_return(st.body);
+  if (st instanceof ForStatementNode) return statement_has_return(st.body);
+
+  return false;
+}
+
+export function body_has_return(body: BlockStatementNode): boolean {
+  return body.statements.get_items().some((st) => statement_has_return(st));
 }
 
 export class BreakStatementNode extends StatementNode {

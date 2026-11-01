@@ -1,14 +1,7 @@
 import { Token } from "../lexer";
 import { Term } from "./ast";
 import { resolve, Substitution } from "./unify";
-import {
-  check_unify,
-  create_any_type,
-  create_boolean_type,
-  create_int_type,
-  create_promise_type,
-  TypeCheckError,
-} from "./index";
+import { check_unify, create_type, TypeCheckError } from "./index";
 
 /**
  * The static signature of a builtin function. Parameters of type `any`
@@ -22,8 +15,8 @@ export interface IntrinsicSignature {
 }
 
 export const intrinsics: Map<string, IntrinsicSignature> = new Map([
-  ["print", { params: [create_any_type()], variadic: true, return: create_boolean_type() }],
-  ["resolve", { params: [create_any_type()], variadic: true, return: create_promise_type(create_int_type()) }],
+  ["print", { params: [create_type("any")], variadic: true, return: create_type("bool") }],
+  ["resolve", { params: [create_type("any")], variadic: true, return: create_type("promise", [create_type("int")]) }],
 ]);
 
 /** Check a call to a builtin against its signature, throwing on violation. */

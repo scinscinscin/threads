@@ -15,25 +15,22 @@ import {
 } from "../../value";
 import { Token, TokenType } from "../../lexer";
 import { BaseNode, ListNode } from "./base";
+import { body_has_return } from "./statements";
 import type { BlockStatementNode } from "./statements";
 import {
   check_unify,
-  create_array_type,
   create_binding,
-  create_boolean_type,
-  create_function_type_n,
-  create_int_type,
-  create_null_type,
-  create_object_type,
-  create_promise_type,
-  create_string_type,
+  create_type,
+  get_fresh_counter_value,
   fresh_var,
+  generalize,
+  instantiate_binding,
   object_property_type,
   TypeCheckError,
   TypeEnvironment,
 } from "../../typechecker";
-import { apply_term, resolve, Substitution, unify_write } from "../../typechecker/unify";
-import { show_type, Term } from "../../typechecker/ast";
+import { resolve, Substitution, unify_write } from "../../typechecker/unify";
+import { compound, show_type, Term } from "../../typechecker/ast";
 import { check_intrinsic_call, intrinsics } from "../../typechecker/intrinsics";
 
 export abstract class ExpressionNode extends BaseNode {
@@ -79,13 +76,13 @@ export class UnaryExpressionNode extends ExpressionNode {
   infer(e: TypeEnvironment, sub: Substitution): Term {
     if (this.op.type === TokenType.MINUS) {
       const operand = this.operand.infer(e, sub);
-      check_unify(operand, create_int_type(), sub, `Unary "-" requires an int operand`);
-      return create_int_type();
+      check_unify(operand, create_type("int"), sub, `Unary "-" requires an int operand`);
+      return create_type("int");
     }
 
     if (this.op.type === TokenType.NOT) {
       this.operand.infer(e, sub);
-      return create_boolean_type();
+      return create_type("bool");
     }
 
     if (this.op.type === TokenType.AWAIT) {
@@ -95,7 +92,7 @@ export class UnaryExpressionNode extends ExpressionNode {
       const m = sub.mark();
 
       const inner = fresh_var();
-      if (unify_write(operand, create_promise_type(inner), sub)) return resolve(inner, sub.map);
+      if (unify_write(operand, create_type("promise", [inner]), sub)) return resolve(inner, sub.map);
       sub.unmark(m);
 
       return operand;
@@ -201,13 +198,13 @@ export class BinaryExpressionNode extends ExpressionNode {
 
       // overloaded: int + int or str + str, decided by backtracking
       const m = sub.mark();
-      if (unify_write(left, create_int_type(), sub) && unify_write(right, create_int_type(), sub))
-        return create_int_type();
+      if (unify_write(left, create_type("int"), sub) && unify_write(right, create_type("int"), sub))
+        return create_type("int");
       sub.unmark(m);
 
       const m2 = sub.mark();
-      if (unify_write(left, create_string_type(), sub) && unify_write(right, create_string_type(), sub))
-        return create_string_type();
+      if (unify_write(left, create_type("str"), sub) && unify_write(right, create_type("str"), sub))
+        return create_type("str");
 
       sub.unmark(m2);
       throw new TypeCheckError(`Unsupported operands for "+"`, this.op);
@@ -217,14 +214,14 @@ export class BinaryExpressionNode extends ExpressionNode {
     const right = this.right.infer(e, sub);
 
     if (op === TokenType.MINUS || op === TokenType.MULTIPLY || op === TokenType.DIVIDE) {
-      check_unify(left, create_int_type(), sub, `Left operand of "${this.op.lexeme}"`);
-      check_unify(right, create_int_type(), sub, `Right operand of "${this.op.lexeme}"`);
-      return create_int_type();
+      check_unify(left, create_type("int"), sub, `Left operand of "${this.op.lexeme}"`);
+      check_unify(right, create_type("int"), sub, `Right operand of "${this.op.lexeme}"`);
+      return create_type("int");
     }
 
     if (op === TokenType.EQUAL_EQUAL || op === TokenType.NOT_EQUAL) {
       // the runtime compares any two values, so both sides stay unconstrained
-      return create_boolean_type();
+      return create_type("bool");
     }
 
     if (
@@ -233,9 +230,9 @@ export class BinaryExpressionNode extends ExpressionNode {
       op === TokenType.LESS_EQUAL ||
       op === TokenType.GREATER_EQUAL
     ) {
-      check_unify(left, create_int_type(), sub, `Left operand of "${this.op.lexeme}"`);
-      check_unify(right, create_int_type(), sub, `Right operand of "${this.op.lexeme}"`);
-      return create_boolean_type();
+      check_unify(left, create_type("int"), sub, `Left operand of "${this.op.lexeme}"`);
+      check_unify(right, create_type("int"), sub, `Right operand of "${this.op.lexeme}"`);
+      return create_type("bool");
     }
 
     throw new TypeCheckError(`Unsupported operator token: ${TokenType[op]}`, this.op);
@@ -269,10 +266,10 @@ export class LiteralExpressionNode extends ExpressionNode {
 
   infer(e: TypeEnvironment, sub: Substitution): Term {
     const t = this.value.type;
-    if (t === TokenType.NUMBER_LITERAL) return create_int_type();
-    if (t === TokenType.STRING_LITERAL) return create_string_type();
-    if (t === TokenType.BOOLEAN_LITERAL) return create_boolean_type();
-    if (t === TokenType.NULL_LITERAL) return create_null_type();
+    if (t === TokenType.NUMBER_LITERAL) return create_type("int");
+    if (t === TokenType.STRING_LITERAL) return create_type("str");
+    if (t === TokenType.BOOLEAN_LITERAL) return create_type("bool");
+    if (t === TokenType.NULL_LITERAL) return create_type("null");
     throw new TypeCheckError(`Unexpected literal token: ${TokenType[t]}`, this.value);
   }
 
@@ -294,8 +291,7 @@ export class IdentifierExpressionNode extends ExpressionNode {
     const name = this.identifier.lexeme;
     const binding = e.get(name);
     if (binding === undefined) throw new TypeCheckError(`Undefined variable "${name}"`, this.identifier);
-    for (const v of binding.poly.vars) sub.bind(v, fresh_var());
-    return apply_term(binding.poly.type, sub.fork());
+    return instantiate_binding(binding, sub);
   }
 
   check(type: Term, e: TypeEnvironment, sub: Substitution): void {
@@ -361,8 +357,8 @@ export class ArrayAccessExpressionNode extends ExpressionNode {
     const index = this.index.infer(e, sub);
 
     const elem = fresh_var();
-    if (unify_write(container, create_array_type(elem), sub)) {
-      check_unify(index, create_int_type(), sub, "Array index");
+    if (unify_write(container, create_type("array", [elem]), sub)) {
+      check_unify(index, create_type("int"), sub, "Array index");
       return resolve(elem, sub.map);
     }
 
@@ -476,10 +472,18 @@ export class AssignmentExpressionNode extends ExpressionNode {
       if (binding.mutable === false)
         throw new TypeCheckError(`Cannot assign to immutable "${name}"`, this.target.identifier);
 
-      const declared = apply_term(binding.poly.type, sub.fork());
-      const value = this.value.infer(e, sub);
-      check_unify(value, declared, sub, `Assignment to "${name}"`);
-      return resolve(declared, sub.map);
+      // Check the new value against a fresh instance of the current type, then
+      // refresh the binding's polytype from the new value. The Binding object is
+      // mutated in place (rather than replacing the map entry) so the update is
+      // visible from every scope that captured the variable, mirroring the
+      // runtime's define-scope mutation.
+      const declared = instantiate_binding(binding, sub);
+      const before = get_fresh_counter_value();
+
+      const value_expr_type = this.value.infer(e, sub);
+      check_unify(value_expr_type, declared, sub, `Assignment to "${name}"`);
+      binding.poly = generalize(value_expr_type, e, sub, before);
+      return resolve(value_expr_type, sub.map);
     }
 
     if (this.target instanceof DotAccessExpressionNode) {
@@ -501,13 +505,13 @@ export class AssignmentExpressionNode extends ExpressionNode {
     if (this.target instanceof ArrayAccessExpressionNode) {
       const container = this.target.expr.infer(e, sub);
       const array_element_type = fresh_var();
-      if (!unify_write(container, create_array_type(array_element_type), sub)) {
+      if (!unify_write(container, create_type("array", [array_element_type]), sub)) {
         const resolved = resolve(container, sub.map);
         throw new TypeCheckError(`Value of type ${show_type(resolved)} is not assignable`);
       }
 
       const index = this.target.index.infer(e, sub);
-      check_unify(index, create_int_type(), sub, "Array index");
+      check_unify(index, create_type("int"), sub, "Array index");
 
       const value = this.value.infer(e, sub);
       check_unify(value, array_element_type, sub, "Array assignment");
@@ -569,7 +573,9 @@ export class ObjectLiteralExpressionNode extends ExpressionNode {
       } else entries[existing] = [key, type];
     }
 
-    return create_object_type(entries);
+        // Property entries are named compounds, not registered types, so they are
+    // built with raw `compound`; only the `obj` wrapper goes through create_type.
+    return create_type("obj", entries.map(([key, type]) => compound(key, [type])));
   }
 
   check(type: Term, e: TypeEnvironment, sub: Substitution): void {
@@ -603,7 +609,7 @@ export class ArrayLiteralExpressionNode extends ExpressionNode {
   infer(e: TypeEnvironment, sub: Substitution): Term {
     const elem = fresh_var();
     for (const item of this.items.get_items()) check_unify(item.infer(e, sub), elem, sub, "Array element");
-    return create_array_type(resolve(elem, sub.map));
+    return create_type("array", [resolve(elem, sub.map)]);
   }
 
   check(type: Term, e: TypeEnvironment, sub: Substitution): void {
@@ -637,13 +643,14 @@ export class FunctionExpressionNode extends ExpressionNode {
     });
     this.body.typecheck(body_env, sub, return_type);
 
-    // a body that never returns resolves to null at runtime
-    const resolved_ret = resolve(return_type, sub.map);
-    if (resolved_ret.kind === "var") sub.bind(resolved_ret.name, create_null_type());
+    // a body without any return statement resolves to null at runtime. Only bind
+    // in that case: a `return <param>` unifies return_type with the parameter
+    // variable, which is also still unbound but is not a fall-off.
+    if (body_has_return(this.body) === false) sub.bind(return_type.name, create_type("null"));
 
     // async-ness is encoded in the return type, so calls need no special case
-    const ret_type = this.is_async ? create_promise_type(return_type) : return_type;
-    return create_function_type_n(parameter_types, ret_type);
+    const ret_type = this.is_async ? create_type("promise", [return_type]) : return_type;
+    return create_type("f", [...parameter_types, ret_type]);
   }
 
   check(type: Term, e: TypeEnvironment, sub: Substitution): void {
@@ -726,7 +733,7 @@ export class FunctionCallExpressionNode extends ExpressionNode {
       // commit the callee to a function type matching this call's arity
       const ret = fresh_var();
       const param_types = argument_types.map(() => fresh_var());
-      const fn_type = create_function_type_n(param_types, ret);
+      const fn_type = create_type("f", [...param_types, ret]);
 
       if (!unify_write(callee_type, fn_type, sub))
         throw new TypeCheckError(

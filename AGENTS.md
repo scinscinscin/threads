@@ -8,7 +8,9 @@
 - `yarn example` / `yarn demo` - run `example_program.lol` / `concurrency_demo.lol`
 - `yarn start [file.lol]` - run any `.lol` file (defaults to `example_program.lol`)
 - `yarn typecheck` - `tsc --noEmit`
-- There is no test suite, lint, or CI. `yarn test` is a stub that exits 1. Verification = typecheck + running the demo programs and checking their output.
+- `yarn test` - vitest suite (`test/*.test.ts`): typechecker units (create_type, unify, generalize/instantiate) plus end-to-end parse+typecheck programs
+- CI (`.github/workflows/ci.yml`) runs typecheck, tests, and the example on push to main
+- There is no linter. Verification = typecheck + tests + running the demo programs and checking their output.
 
 ## Architecture (all in `src/`)
 
@@ -17,6 +19,7 @@
 - `parser.ts` - sparse LR(1) parser + AST node classes + `reducers` map
 - `interpreter.ts` - `Environment`, `CallFrame`, `Thread`, `Interpreter` scheduler
 - `value.ts` - runtime values, `FunctionValue`/`PromiseValue`, builtins
+- `typechecker/` - static Hindley-Milner typechecker (no annotations in the grammar): `index.ts` (type registry via `create_type`, `Binding`/generalization, `typecheck()` driver), `ast.ts` (`Term` = atom/var/compound, `show_type`), `unify.ts` (trail substitution), `intrinsics.ts` (builtin signatures)
 
 ## Runtime & concurrency
 
