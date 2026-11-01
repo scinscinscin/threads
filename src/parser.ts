@@ -26,11 +26,17 @@ import {
   ExpressionNode,
   FunctionCallExpressionNode,
   FunctionExpressionNode,
+  FunctionParameter,
   GroupingExpressionNode,
   IdentifierExpressionNode,
   LiteralExpressionNode,
   ObjectLiteralExpressionNode,
   ObjectPropertyNode,
+  TypeArrayNode,
+  TypeConcreteNode,
+  TypeExpressionNode,
+  TypeFunctionNode,
+  TypeParametricNode,
   UnaryExpressionNode,
 } from "./parser/nodes/expressions";
 
@@ -60,14 +66,15 @@ const reducers = {
 
   block_statement: (bag: { stmts?: ListNode<StatementNode> }) =>
     new BlockStatementNode(bag.stmts ?? new ListNode<StatementNode>([])),
-  params_list: (bag: { param: Token; rest?: ListNode<Token> }) =>
-    new ListNode<Token>([bag.param, ...(bag.rest?.get_items() ?? [])]),
-  param: (bag: { parameter_name: Token }) => bag.parameter_name,
-  var_decl: (bag: { variable_name: Token; value: ExpressionNode }) =>
-    new VariableDeclarationNode(bag.variable_name, bag.value),
+  params_list: (bag: { param: FunctionParameter; rest?: ListNode<FunctionParameter> }) =>
+    new ListNode<FunctionParameter>([bag.param, ...(bag.rest?.get_items() ?? [])]),
+  param: (bag: { parameter_name: Token; type?: TypeExpressionNode }) =>
+    new FunctionParameter(bag.parameter_name, bag.type ?? null),
+  var_decl: (bag: { variable_name: Token; type?: TypeExpressionNode; value: ExpressionNode }) =>
+    new VariableDeclarationNode(bag.variable_name, bag.type ?? null, bag.value),
   // for-loop initializer: same shape as var_decl but without the trailing semicolon
-  for_var_decl: (bag: { variable_name: Token; value: ExpressionNode }) =>
-    new VariableDeclarationNode(bag.variable_name, bag.value),
+  for_var_decl: (bag: { variable_name: Token; type?: TypeExpressionNode; value: ExpressionNode }) =>
+    new VariableDeclarationNode(bag.variable_name, bag.type ?? null, bag.value),
   return_stmt: (bag: { expr?: ExpressionNode }) => new ReturnStatementNode(bag.expr ?? null),
   expr_stmt: (bag: { expr: ExpressionNode }) => new ExpressionStatementNode(bag.expr),
 
@@ -120,8 +127,29 @@ const reducers = {
     new ListNode<ExpressionNode>([bag.expr, ...(bag.rest?.get_items() ?? [])]),
   primitive_literal_expr: (bag: { value: Token }) => new LiteralExpressionNode(bag.value),
 
-  function_expr: (bag: { async_mod?: Token; params_list?: ListNode<Token>; body: BlockStatementNode }) =>
-    new FunctionExpressionNode(bag.async_mod !== undefined, bag.params_list ?? new ListNode<Token>([]), bag.body),
+  function_expr: (bag: {
+    async_mod?: Token;
+    params_list?: ListNode<FunctionParameter>;
+    return_type?: TypeExpressionNode;
+    body: BlockStatementNode;
+  }) =>
+    new FunctionExpressionNode(
+      bag.async_mod !== undefined,
+      bag.params_list ?? new ListNode<FunctionParameter>([]),
+      bag.return_type ?? null,
+      bag.body,
+    ),
+
+  // type annotations build a TypeExpressionNode tree; each node lowers itself
+  // to a Term so unknown names become positioned type errors
+  type_name: (bag: { name: Token }) => new TypeConcreteNode(bag.name),
+  type_param: (bag: { name: Token; args: ListNode<TypeExpressionNode> }) =>
+    new TypeParametricNode(bag.name, bag.args.get_items()),
+  type_array: (bag: { expr: TypeExpressionNode }) => new TypeArrayNode(bag.expr),
+  type_func: (bag: { params?: ListNode<TypeExpressionNode>; return_type: TypeExpressionNode }) =>
+    new TypeFunctionNode(bag.params?.get_items() ?? [], bag.return_type),
+  type_list: (bag: { type: TypeExpressionNode; rest?: ListNode<TypeExpressionNode> }) =>
+    new ListNode<TypeExpressionNode>([bag.type, ...(bag.rest?.get_items() ?? [])]),
 
   assignment_expr: (bag: { identifier_expr: ExpressionNode; expr?: ExpressionNode }) =>
     bag.expr === undefined ? bag.identifier_expr : new AssignmentExpressionNode(bag.identifier_expr, bag.expr),

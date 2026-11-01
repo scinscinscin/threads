@@ -7,7 +7,7 @@ export enum TokenType {
   EQUALS, EQUAL_EQUAL, NOT_EQUAL,
   LESS_THAN, GREATER_THAN, LESS_EQUAL, GREATER_EQUAL,
   NOT, AND, OR,
-  COMMA, SEMICOLON, COLON, DOT,
+  COMMA, SEMICOLON, COLON, DOT, ARROW,
   NUMBER_LITERAL, STRING_LITERAL, BOOLEAN_LITERAL, NULL_LITERAL,
   IDENTIFIER, ASYNC, FUNCTION, LET, RETURN, AWAIT,
   EXPORT, CLASS, EXTENDS, PUBLIC, PROTECTED, PRIVATE,
@@ -48,6 +48,7 @@ lexerGenerator.addRule("semicolon", "$;", TokenType.SEMICOLON);
 lexerGenerator.addRule("equals", "$=", TokenType.EQUALS);
 lexerGenerator.addRule("colon", "$:", TokenType.COLON);
 lexerGenerator.addRule("dot", "$.", TokenType.DOT);
+lexerGenerator.addRule("arrow", "$=$>", TokenType.ARROW);
 
 lexerGenerator.addRule("number_literal", "(${__decimal_digit})+", TokenType.NUMBER_LITERAL);
 lexerGenerator.addRule("character", "${__letter} | ${__decimal_digit} | ${__symbols} | $ ");

@@ -11,7 +11,7 @@ const create_no_arg_type_constructor =
     return atom(name);
   };
 
-const type_constructors: Record<string, (args: Term[]) => Term> = {
+const type_constructors = {
   int: create_no_arg_type_constructor("int"),
   bool: create_no_arg_type_constructor("bool"),
   void: create_no_arg_type_constructor("void"),
@@ -23,13 +23,35 @@ const type_constructors: Record<string, (args: Term[]) => Term> = {
   array: (args) => compound("array", args),
   obj: (args) => compound("obj", args),
   promise: (args) => compound("promise", args),
-};
+} satisfies Record<string, (args: Term[]) => Term>;
 
 /** Build a type from a registered name and its type arguments; unknown names are a bug. */
-export function create_type(name: string, args: Term[] = []): Term {
+export function create_type(name: keyof typeof type_constructors, args: Term[] = []): Term {
   const ctor = type_constructors[name];
   if (ctor === undefined) throw new Error(`Unknown type: "${name}"`);
   return ctor(args);
+}
+
+/** Surface type names accepted in annotations, mapped to their registry name.
+ *  `arity` is the exact number of type arguments the name takes. */
+type TypeNameInfo = { registry: keyof typeof type_constructors; arity: number };
+
+const type_names: Record<string, TypeNameInfo> = {
+  int: { registry: "int", arity: 0 },
+  bool: { registry: "bool", arity: 0 },
+  void: { registry: "void", arity: 0 },
+  str: { registry: "str", arity: 0 },
+  null: { registry: "null", arity: 0 },
+  any: { registry: "any", arity: 0 },
+  promise: { registry: "promise", arity: 1 },
+  Promise: { registry: "promise", arity: 1 },
+};
+
+/** Resolve a type name written in an annotation; unknown names are a type error. */
+export function resolve_type_name(name: string, token?: Token): TypeNameInfo {
+  const info = type_names[name];
+  if (info !== undefined) return info;
+  throw new TypeCheckError(`Unknown type name: "${name}"`, token);
 }
 
 /** The value type of `obj.key` for an `obj`-typed term, or null when absent or not an object. */

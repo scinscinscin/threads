@@ -224,3 +224,188 @@ print(-"s");
     );
   });
 });
+
+describe("typechecker: type annotations (accepted)", () => {
+  it("annotates a variable with an atom type", () => {
+    typecheck_source(`
+let x: int = 5;
+print(x + 1);
+`);
+  });
+
+  it("annotates arrays, including nested arrays", () => {
+    typecheck_source(`
+let a: int[] = [1, 2];
+print(a[0] + a[1]);
+let b: int[][] = [[1], [2]];
+print(b[1][0]);
+`);
+  });
+
+  it("annotates a promise with a parametric type", () => {
+    typecheck_source(`
+let p: Promise<int> = resolve();
+print(await p);
+`);
+  });
+
+  it("annotates function types, including zero-argument and nested", () => {
+    typecheck_source(`
+let f: (int, str) => bool = function(a, b) {
+  return a + 1 > 0;
+};
+print(f(1, "s"));
+let g: () => int = function() {
+  return 3;
+};
+print(g());
+let h: ((int) => str) => bool = function(f) {
+  return f(1) == "a";
+};
+print(h(function(x) {
+  return "a";
+}));
+`);
+  });
+
+  it("annotates parameters and the return type of a function", () => {
+    typecheck_source(`
+let add = function(a: int, b: int): int {
+  return a + b;
+};
+print(add(1, 2));
+let f: (int) => int = function(x: int): int {
+  return x;
+};
+print(f(2));
+`);
+  });
+
+  it("annotates an async return type as the inner type, auto promise-wrapped", () => {
+    typecheck_source(`
+let a = async function(): int {
+  return 3;
+};
+print(await a());
+`);
+  });
+
+  it("treats a Promise annotation on an async function as promise-of-promise", () => {
+    typecheck_source(`
+let outer = async function(): Promise<int> {
+  return resolve();
+};
+let mid = await outer();
+print(await mid);
+`);
+  });
+
+  it("keeps partially annotated functions polymorphic in their unannotated parts", () => {
+    typecheck_source(`
+let h = function(x: int, y) {
+  return y;
+};
+print(h(1, "s"));
+print(h(2, 3));
+`);
+  });
+
+  it("annotates a for-loop initializer", () => {
+    typecheck_source(`
+let total = 0;
+for (let i: int = 0; i < 3; i = i + 1) {
+  total = total + i;
+}
+print(total);
+`);
+  });
+
+  it("accepts a bare return when the return annotation is void", () => {
+    typecheck_source(`
+let f = function(x): void {
+  print(x);
+  return;
+};
+f(1);
+`);
+  });
+});
+
+describe("typechecker: type annotations (rejected)", () => {
+  it("rejects an initializer that does not match the variable annotation", () => {
+    expect_type_error(
+      `
+let x: int = "s";
+`,
+      `Initializer for "x": got str, expected int`,
+    );
+  });
+
+  it("rejects a return expression that does not match the return annotation", () => {
+    expect_type_error(
+      `
+let f = function(x): int {
+  return "s";
+};
+`,
+      `Literal "s": got str, expected int`,
+    );
+  });
+
+  it("rejects a body that falls off the end with a non-void return annotation", () => {
+    expect_type_error(
+      `
+let f = function(): int {};
+`,
+      `Function body falls off the end: got null, expected int`,
+    );
+  });
+
+  it("rejects an annotated parameter called with a wrong argument", () => {
+    expect_type_error(
+      `
+let f = function(x: int) {
+  return x + 1;
+};
+f("s");
+`,
+      `Argument 1: got str, expected int`,
+    );
+  });
+
+  it("rejects an unknown type name", () => {
+    expect_type_error(
+      `
+let x: float = 1;
+`,
+      `Unknown type name: "float"`,
+    );
+  });
+
+  it("rejects a bare parametric type name without its type argument", () => {
+    expect_type_error(
+      `
+let p: Promise = 1;
+`,
+      `Type "Promise" requires a type argument`,
+    );
+  });
+
+  it("rejects the wrong number of type arguments", () => {
+    expect_type_error(
+      `
+let p: Promise<int, str> = 1;
+`,
+      `Type "Promise" takes 1 type argument, got 2`,
+    );
+  });
+
+  it("rejects type arguments on a concrete type name", () => {
+    expect_type_error(
+      `
+let x: int<bool> = 1;
+`,
+      `Type "int" takes no type arguments`,
+    );
+  });
+});

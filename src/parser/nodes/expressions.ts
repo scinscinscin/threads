@@ -15,7 +15,7 @@ import {
 } from "../../value";
 import { Token, TokenType } from "../../lexer";
 import { BaseNode, ListNode } from "./base";
-import { body_has_return } from "./statements";
+import { body_has_return, is_void } from "./statements";
 import type { BlockStatementNode } from "./statements";
 import {
   check_unify,
@@ -26,6 +26,7 @@ import {
   generalize,
   instantiate_binding,
   object_property_type,
+  resolve_type_name,
   TypeCheckError,
   TypeEnvironment,
 } from "../../typechecker";
@@ -573,9 +574,12 @@ export class ObjectLiteralExpressionNode extends ExpressionNode {
       } else entries[existing] = [key, type];
     }
 
-        // Property entries are named compounds, not registered types, so they are
+    // Property entries are named compounds, not registered types, so they are
     // built with raw `compound`; only the `obj` wrapper goes through create_type.
-    return create_type("obj", entries.map(([key, type]) => compound(key, [type])));
+    return create_type(
+      "obj",
+      entries.map(([key, type]) => compound(key, [type])),
+    );
   }
 
   check(type: Term, e: TypeEnvironment, sub: Substitution): void {
@@ -617,36 +621,129 @@ export class ArrayLiteralExpressionNode extends ExpressionNode {
   }
 }
 
+/**
+ * A type annotation as parsed from source. The concrete subclasses mirror the
+ * grammar's type expressions (`int`, `Promise<int>`, `int[]`, `(int, str) =>
+ * bool`); each lowers itself to a static `Term` via `lower`, so unknown type
+ * names become positioned type errors at typecheck time.
+ */
+export abstract class TypeExpressionNode extends BaseNode {
+  constructor() {
+    super();
+  }
+
+  abstract lower(): Term;
+}
+
+/** A bare type name: `int`, `str`, ... A bare parametric name (no `<...>`) is a type error. */
+export class TypeConcreteNode extends TypeExpressionNode {
+  constructor(public readonly name: Token) {
+    super();
+  }
+
+  lower(): Term {
+    const info = resolve_type_name(this.name.lexeme, this.name);
+    if (info.arity !== 0) throw new TypeCheckError(`Type "${this.name.lexeme}" requires a type argument`, this.name);
+    return create_type(info.registry);
+  }
+}
+
+/** A parametric type with its type arguments: `Promise<int>`. */
+export class TypeParametricNode extends TypeExpressionNode {
+  constructor(
+    public readonly name: Token,
+    public readonly args: TypeExpressionNode[],
+  ) {
+    super();
+  }
+
+  lower(): Term {
+    const info = resolve_type_name(this.name.lexeme, this.name);
+    if (info.arity === 0) throw new TypeCheckError(`Type "${this.name.lexeme}" takes no type arguments`, this.name);
+    if (this.args.length === info.arity)
+      return create_type(
+        info.registry,
+        this.args.map((a) => a.lower()),
+      );
+    throw new TypeCheckError(
+      `Type "${this.name.lexeme}" takes ${info.arity} type argument, got ${this.args.length}`,
+      this.name,
+    );
+  }
+}
+
+/** An array type: `int[]`. */
+export class TypeArrayNode extends TypeExpressionNode {
+  constructor(public readonly inner: TypeExpressionNode) {
+    super();
+  }
+
+  lower(): Term {
+    return create_type("array", [this.inner.lower()]);
+  }
+}
+
+/** A function type: `(int, str) => bool`. */
+export class TypeFunctionNode extends TypeExpressionNode {
+  constructor(
+    public readonly params: TypeExpressionNode[],
+    public readonly return_type: TypeExpressionNode,
+  ) {
+    super();
+  }
+
+  lower(): Term {
+    return create_type("f", [...this.params.map((p) => p.lower()), this.return_type.lower()]);
+  }
+}
+
+/** A function parameter with an optional type annotation. */
+export class FunctionParameter extends BaseNode {
+  constructor(
+    public readonly name: Token,
+    public readonly type: TypeExpressionNode | null,
+  ) {
+    super();
+  }
+}
+
 export class FunctionExpressionNode extends ExpressionNode {
   constructor(
     public readonly is_async: boolean,
-    public readonly params_list: ListNode<Token>,
+    public readonly params_list: ListNode<FunctionParameter>,
+    public readonly return_type: TypeExpressionNode | null,
     public readonly body: BlockStatementNode,
   ) {
     super();
   }
 
   eval(thread: Thread, frame: CallFrame, interpreter: Interpreter, k: (value: Value) => void): void {
-    const params = this.params_list.get_items().map((t) => t.lexeme);
+    const params = this.params_list.get_items().map((p) => p.name.lexeme);
     const fn = new FunctionValue("anon", frame.environment, this.is_async, params, this.body);
     k(fn);
   }
 
   infer(e: TypeEnvironment, sub: Substitution): Term {
     const params = this.params_list.get_items();
-    const parameter_types = params.map(() => fresh_var());
-    const return_type = fresh_var();
+    // annotated parameters and return types are fixed by the annotation;
+    // unannotated parts still get fresh variables for inference/generalization
+    const parameter_types = params.map((p) => (p.type === null ? fresh_var() : p.type.lower()));
+    const return_type = this.return_type === null ? fresh_var() : this.return_type.lower();
 
     const body_env = new Map(e);
-    params.forEach((token, i) => {
-      body_env.set(token.lexeme, create_binding({ vars: [], type: parameter_types[i] }, true));
+    params.forEach((p, i) => {
+      body_env.set(p.name.lexeme, create_binding({ vars: [], type: parameter_types[i] }, true));
     });
     this.body.typecheck(body_env, sub, return_type);
 
-    // a body without any return statement resolves to null at runtime. Only bind
-    // in that case: a `return <param>` unifies return_type with the parameter
-    // variable, which is also still unbound but is not a fall-off.
-    if (body_has_return(this.body) === false) sub.bind(return_type.name, create_type("null"));
+    // a body without any return statement resolves to null at runtime. With no
+    // annotation the return variable is still unconstrained, so bind it; with an
+    // annotation, null is only acceptable for void/null return types.
+    if (body_has_return(this.body) === false) {
+      if (return_type.kind === "var") sub.bind(return_type.name, create_type("null"));
+      else if (is_void(return_type, sub) === false)
+        check_unify(create_type("null"), return_type, sub, "Function body falls off the end");
+    }
 
     // async-ness is encoded in the return type, so calls need no special case
     const ret_type = this.is_async ? create_type("promise", [return_type]) : return_type;

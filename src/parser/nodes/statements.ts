@@ -1,6 +1,7 @@
 import { CallFrame, Interpreter, LoopFrame, Thread } from "../../interpreter";
 import { Token } from "../../lexer";
 import {
+  check_unify,
   create_binding,
   create_type,
   get_fresh_counter_value,
@@ -12,7 +13,7 @@ import { show_type, Term } from "../../typechecker/ast";
 import { resolve, Substitution } from "../../typechecker/unify";
 import { is_truthy, NullValue, Value } from "../../value";
 import { BaseNode, ListNode } from "./base";
-import { ExpressionNode } from "./expressions";
+import { ExpressionNode, TypeExpressionNode } from "./expressions";
 
 type StatementOutcome =
   | { kind: "ok" }
@@ -71,7 +72,8 @@ export class BlockStatementNode extends StatementNode {
 export class VariableDeclarationNode extends StatementNode {
   constructor(
     public readonly variable_name: Token,
-    public readonly value: ExpressionNode,
+    public readonly type: TypeExpressionNode | null,
+    public readonly value: ExpressionNode | null,
   ) {
     super();
   }
@@ -88,6 +90,20 @@ export class VariableDeclarationNode extends StatementNode {
   }
 
   typecheck(e: TypeEnvironment, sub: Substitution, r: Term): TypeEnvironment {
+    const name = this.variable_name.lexeme;
+
+    // an annotated declaration is checked against the annotation and stays
+    // monomorphic: annotations cannot contain type variables, so there is
+    // nothing to generalize
+    if (this.type !== null) {
+      const annotated_type = this.type.lower();
+      if (this.value !== null) check_unify(this.value.infer(e, sub), annotated_type, sub, `Initializer for "${name}"`);
+
+      const env2: TypeEnvironment = new Map(e);
+      env2.set(name, create_binding({ vars: [], type: annotated_type }, true));
+      return env2;
+    }
+
     // `let x;` starts as null at runtime but accepts any later assignment,
     // so it is typed with an unconstrained variable the first assignment pins
     const before = get_fresh_counter_value();
@@ -95,12 +111,12 @@ export class VariableDeclarationNode extends StatementNode {
     const poly = generalize(variable_type, e, sub, before);
 
     const env2: TypeEnvironment = new Map(e);
-    env2.set(this.variable_name.lexeme, create_binding(poly, true));
+    env2.set(name, create_binding(poly, true));
     return env2;
   }
 }
 
-function is_void(t: Term, sub: Substitution): boolean {
+export function is_void(t: Term, sub: Substitution): boolean {
   const r = resolve(t, sub.map);
   return r.kind === "atom" && r.name === "void";
 }

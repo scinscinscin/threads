@@ -19,7 +19,7 @@
 - `parser.ts` - sparse LR(1) parser + AST node classes + `reducers` map
 - `interpreter.ts` - `Environment`, `CallFrame`, `Thread`, `Interpreter` scheduler
 - `value.ts` - runtime values, `FunctionValue`/`PromiseValue`, builtins
-- `typechecker/` - static Hindley-Milner typechecker (no annotations in the grammar): `index.ts` (type registry via `create_type`, `Binding`/generalization, `typecheck()` driver), `ast.ts` (`Term` = atom/var/compound, `show_type`), `unify.ts` (trail substitution), `intrinsics.ts` (builtin signatures)
+- `typechecker/` - static Hindley-Milner typechecker (inference + optional annotations): `index.ts` (type registry via `create_type`, annotation name table via `resolve_type_name`, `Binding`/generalization, `typecheck()` driver), `ast.ts` (`Term` = atom/var/compound, `show_type`), `unify.ts` (trail substitution), `intrinsics.ts` (builtin signatures)
 
 ## Runtime & concurrency
 
@@ -47,3 +47,5 @@ If a tick makes no progress, every remaining thread is promise-blocked and `run(
 **Scoping:** environments chain via `parent`. A function call forks the *definition-site* environment (closures) and binds parameters in the fork; a block forks the current environment (block scope). Function declarations register the function when the declaration statement executes - there is no hoisting, so declare before use. The global environment provides `print` and `sleep`.
 
 **Language surface:** builtins are only `print` and `sleep`; the only operator is `+` (number/string); numbers are integers only; strings are double-quoted (single quotes allowed inside, `\n` unescaped).
+
+**Type annotations (optional):** `let x: T = expr;`, for-loop initializers, `function(p: T): R { ... }`. A type expression is an identifier (`int`, `bool`, `void`, `str`, `null`, `any`), `Name<Inner>` (only `promise`/`Promise`), `T[]` (repeatable), or `(T, ..., T) => R` (`=>` is type-syntax only; `function` definitions use `: R`). An async function's return annotation is the *inner* type (auto promise-wrapped), so `Promise<T>` in an async annotation means promise-of-promise. Annotations are parsed into a tree of `TypeExpressionNode` subclasses (`TypeConcreteNode`, `TypeParametricNode`, `TypeArrayNode`, `TypeFunctionNode`), each of which lowers itself to a `Term` via its `lower()` method at typecheck time (unknown names are positioned `TypeCheckError`s). Annotated declarations are checked and stay monomorphic; unannotated code infers and generalizes exactly as before. A body that falls off the end with a non-`void`/non-`null` return annotation is a type error.
