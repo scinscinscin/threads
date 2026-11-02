@@ -409,3 +409,158 @@ let x: int<bool> = 1;
     );
   });
 });
+
+describe("typechecker: deferred function bodies (accepted)", () => {
+  it("typechecks a body that references a function declared later", () => {
+    typecheck_source(`
+let early = function() {
+  return after();
+};
+let after = function() {
+  return 1;
+};
+print(early());
+`);
+  });
+
+  it("typechecks mutually recursive functions with a base case", () => {
+    typecheck_source(`
+let f = function(x) {
+  if (x == 1) return 0;
+  return g(x - 1);
+};
+let g = function(y) {
+  return f(y);
+};
+print(f(3));
+`);
+  });
+
+  it("typechecks a body that references a value declared later", () => {
+    typecheck_source(`
+let f = function() {
+  return n;
+};
+let n = 5;
+print(f());
+`);
+  });
+
+  it("propagates constraints through a forward reference", () => {
+    typecheck_source(`
+let f = function(x) {
+  return g(x);
+};
+let g = function(y) {
+  return y + 1;
+};
+let a = f(1);
+print(a + 1);
+`);
+  });
+
+  it("typechecks mutually recursive functions with annotations", () => {
+    typecheck_source(`
+let f: (int) => int = function(x) {
+  return g(x);
+};
+let g: (int) => int = function(x) {
+  return x + 1;
+};
+print(f(1));
+`);
+  });
+
+  it("typechecks a block-local body that references a later top-level declaration", () => {
+    typecheck_source(`
+let a = function() {
+  let c = function() {
+    return b;
+  };
+  return c;
+};
+let b = 1;
+print(a()());
+`);
+  });
+
+  it("accepts an unconstrained mutual cycle as a shared unknown", () => {
+    typecheck_source(`
+let f = function() {
+  return g();
+};
+let g = function() {
+  return f();
+};
+print(f());
+`);
+  });
+
+  it("typechecks a reassigned function whose body references a later declaration", () => {
+    typecheck_source(`
+let f = function() {
+  return 1;
+};
+f = function() {
+  return later();
+};
+let later = function() {
+  return 2;
+};
+print(f());
+`);
+  });
+});
+
+describe("typechecker: deferred function bodies (rejected)", () => {
+  it("rejects an argument that conflicts with a constraint from a later declaration", () => {
+    expect_type_error(
+      `
+let f = function(x) {
+  return g(x);
+};
+let g = function(y) {
+  return y + 1;
+};
+let a = f(1);
+let b = f("s");
+`,
+      `Argument 1: got str, expected int`,
+    );
+  });
+
+  it("still rejects a forward reference in a value expression", () => {
+    expect_type_error(
+      `
+let m = n;
+let n = 5;
+`,
+      `Undefined variable "n"`,
+    );
+  });
+
+  it("rejects a declaration whose value conflicts with an earlier body's use", () => {
+    expect_type_error(
+      `
+let f = function() {
+  return n + 1;
+};
+let n = "s";
+`,
+      `Type of "n": got str, expected int`,
+    );
+  });
+
+  it("rejects using a forward-referenced value with the wrong annotation", () => {
+    expect_type_error(
+      `
+let f = function() {
+  return n;
+};
+let n = 5;
+let s: str = f();
+`,
+      `Initializer for "s": got int, expected str`,
+    );
+  });
+});

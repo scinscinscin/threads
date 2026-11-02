@@ -32,13 +32,15 @@ import {
   LiteralExpressionNode,
   ObjectLiteralExpressionNode,
   ObjectPropertyNode,
+  UnaryExpressionNode,
+} from "./parser/nodes/expressions";
+import {
   TypeArrayNode,
   TypeConcreteNode,
   TypeExpressionNode,
   TypeFunctionNode,
   TypeParametricNode,
-  UnaryExpressionNode,
-} from "./parser/nodes/expressions";
+} from "./parser/nodes/types";
 
 type Reducer = (bag: any) => BaseNode;
 

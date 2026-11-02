@@ -1,5 +1,6 @@
 import { Token } from "../lexer";
 import { ProgramNode } from "../parser/nodes/base";
+import { VariableDeclarationNode } from "../parser/nodes/statements";
 import { atom, compound, is_compound, show_type, Term, Var, variable } from "./ast";
 import { apply_term, resolve, Substitution, unify_write } from "./unify";
 
@@ -25,9 +26,9 @@ const type_constructors = {
   promise: (args) => compound("promise", args),
 } satisfies Record<string, (args: Term[]) => Term>;
 
-/** Build a type from a registered name and its type arguments; unknown names are a bug. */
-export function create_type(name: keyof typeof type_constructors, args: Term[] = []): Term {
-  const ctor = type_constructors[name];
+/** Build a type from a registered name and its type arguments; unknown names throw. */
+export function create_type(name: string, args: Term[] = []): Term {
+  const ctor = (type_constructors as Record<string, (args: Term[]) => Term>)[name];
   if (ctor === undefined) throw new Error(`Unknown type: "${name}"`);
   return ctor(args);
 }
@@ -88,25 +89,37 @@ export class TypeCheckError extends Error {
 }
 
 /** Unify two types, throwing a TypeCheckError with both rendered types on failure. */
-export function check_unify(actual: Term, expected: Term, sub: Substitution, message?: string): void {
+export function check_unify(
+  actual: Term,
+  expected: Term,
+  sub: Substitution,
+  message?: string,
+  token?: Token,
+): void {
   if (!unify_write(actual, expected, sub)) {
     throw new TypeCheckError(
       `${message ?? "Type mismatch"}: got ${show_type(resolve(actual, sub.map))}, expected ${show_type(
         resolve(expected, sub.map),
       )}`,
+      token,
     );
   }
 }
 
 export type PolyType = { vars: string[]; type: Term };
 /** `builtin` marks the global `print`/`resolve` entries so call sites can tell
- *  them apart from user declarations that shadow the same name. */
-export type Binding = { poly: PolyType; mutable: boolean; builtin?: boolean };
-export const create_binding = (poly: PolyType, mutable = false, builtin = false): Binding => ({
-  poly,
-  mutable,
-  builtin,
-});
+ *  them apart from user declarations that shadow the same name.
+ *  `placeholder` names the variable a pre-registered declaration was registered
+ *  under; the declaration commits its inferred type to that variable when it is
+ *  processed, and `generalize` keeps variables of other placeholders' classes
+ *  undeclared so their constraints survive. */
+export type Binding = { poly: PolyType; mutable: boolean; builtin?: boolean; placeholder?: string };
+export const create_binding = (
+  poly: PolyType,
+  mutable = false,
+  builtin = false,
+  placeholder?: string,
+): Binding => ({ poly, mutable, builtin, placeholder });
 
 export type TypeEnvironment = Map<string, Binding>;
 
@@ -146,18 +159,45 @@ export function env_free_vars(e: TypeEnvironment): Set<string> {
  * created when the assigned value was checked against the declared instance -- is
  * replaced by a fresh declared variable so the new polytype still re-instantiates
  * independently on each read. Variables already free in the environment are never
- * declared. Returns the polytype with the stored (frozen) type.
+ * declared. Variables linked to another binding's committed placeholder shape are
+ * kept as-is and never declared: that binding will be constrained when it is
+ * processed, and declaring the variable here would let `instantiate_binding`
+ * overwrite the constraint on each read. Returns the polytype with the stored
+ * (frozen) type.
  */
-export function generalize(t: Term, e: TypeEnvironment, sub: Substitution, from: number): PolyType {
+export function generalize(t: Term, e: TypeEnvironment, sub: Substitution, from: number, self?: string): PolyType {
   // get the variables inside
   const env_free = env_free_vars(e);
+
+  // Root variables of the classes shared with other bindings' placeholder shapes.
+  // Comparison is by resolved root so aliases of a shape variable are covered too.
+  // Only unprocessed bindings count: their commit will still add constraints to
+  // their class; a processed binding's polytype is final, and reads of it
+  // re-bind its placeholder to per-read instances, which must not poison the
+  // sharing decision.
+  const shared_roots = new Set<string>();
+  for (const binding of e.values()) {
+    const placeholder = binding.placeholder;
+    if (placeholder === undefined || placeholder === self) continue;
+    const stored = binding.poly.type;
+    if (stored.kind !== "var" || stored.name !== placeholder) continue;
+    for (const v of term_vars(resolve(variable(placeholder), sub.map))) {
+      const root = resolve(variable(v), sub.map);
+      if (root.kind === "var") shared_roots.add(root.name);
+    }
+  }
 
   const replacements = new Map<string, Term>();
   const vars: string[] = [];
   const declared = new Set<string>();
 
+  const is_shared = (v: Var): boolean => {
+    const root = resolve(v, sub.map);
+    return root.kind === "var" && shared_roots.has(root.name);
+  };
+
   const declare = (v: Var): void => {
-    if (!declared.has(v.name) && !env_free.has(v.name)) {
+    if (!declared.has(v.name) && !env_free.has(v.name) && !is_shared(v)) {
       declared.add(v.name);
       vars.push(v.name);
     }
@@ -173,6 +213,8 @@ export function generalize(t: Term, e: TypeEnvironment, sub: Substitution, from:
       declare(resolved);
       return resolved;
     }
+
+    if (is_shared(resolved)) return resolved;
 
     let replacement = replacements.get(resolved.name);
     if (replacement === undefined) {
@@ -208,10 +250,38 @@ export function typecheck(program: ProgramNode): void {
   reset_fresh_vars();
 
   const substitution = new Substitution();
-  let environment = new Map<string, Binding>(Object.entries(globals));
+  const environment = new Map<string, Binding>(Object.entries(globals));
+  const all_environment: TypeEnvironment = new Map(environment);
 
+  // Pre-register the top-level declarations in all_environment so that function
+  // bodies can reference declarations that come after them (a closure sees the
+  // live scope at call time, so this mirrors the runtime). Annotated
+  // declarations register their annotation; unannotated ones register a fresh
+  // placeholder variable, which the declaration commits to its inferred type
+  // when it is processed. Duplicate names are not pre-registered: the later let
+  // overwrites the earlier one, exactly like the live environment.
+  const name_counts = new Map<string, number>();
+  for (const stmt of program.statements.get_items()) {
+    if (stmt instanceof VariableDeclarationNode) {
+      const name = stmt.variable_name.lexeme;
+      name_counts.set(name, (name_counts.get(name) ?? 0) + 1);
+    }
+  }
+  for (const stmt of program.statements.get_items()) {
+    if (!(stmt instanceof VariableDeclarationNode)) continue;
+    if (name_counts.get(stmt.variable_name.lexeme) !== 1) continue;
+    if (stmt.type !== null) {
+      stmt.registered = create_binding({ vars: [], type: stmt.type.lower() }, true);
+    } else {
+      const placeholder = fresh_var();
+      stmt.registered = create_binding({ vars: [], type: placeholder }, true, false, placeholder.name);
+    }
+    all_environment.set(stmt.variable_name.lexeme, stmt.registered);
+  }
+
+  let environment2 = environment;
   for (const stmt of program.statements.get_items()) {
     const r = create_type("void");
-    environment = stmt.typecheck(environment, substitution, r);
+    environment2 = stmt.typecheck(environment2, all_environment, substitution, r);
   }
 }

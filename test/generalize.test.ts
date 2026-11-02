@@ -56,6 +56,49 @@ describe("generalize", () => {
     expect(var_name(type.args[0])).not.toBe(old.name);
   });
 
+  it("keeps variables linked to an unprocessed binding's placeholder shape undeclared", () => {
+    const sub = new Substitution();
+    // another binding's still-uncommitted placeholder, committed to a shape
+    // containing the variable v
+    const placeholder = fresh_var();
+    const v = fresh_var();
+    sub.bind(placeholder.name, compound("f", [v]));
+    const other = create_binding({ vars: [], type: placeholder }, true, false, placeholder.name);
+    const env: TypeEnvironment = new Map([["g", other]]);
+
+    const from = get_fresh_counter_value();
+    const t = fresh_var(); // this infer's variable, linked to v
+    sub.bind(t.name, v);
+
+    const poly = generalize(t, env, sub, from);
+
+    // not declared: the other binding's commit will constrain the class, and
+    // declaring it here would let instantiate_binding drop that constraint
+    expect(poly.vars).toEqual([]);
+    expect(var_name(poly.type)).toBe(v.name);
+  });
+
+  it("still declares variables that only share a processed binding's placeholder", () => {
+    const sub = new Substitution();
+    // a processed binding: its polytype is no longer the placeholder variable,
+    // so reads of it re-bind the placeholder to per-read instances
+    const placeholder = fresh_var();
+    const declared = fresh_var();
+    sub.bind(placeholder.name, compound("f", [declared]));
+    const other = create_binding({ vars: [declared.name], type: compound("f", [declared]) }, true, false, placeholder.name);
+    const env: TypeEnvironment = new Map([["g", other]]);
+
+    const from = get_fresh_counter_value();
+    const t = fresh_var();
+    sub.bind(t.name, declared); // linked to the processed binding's declared var
+
+    const poly = generalize(t, env, sub, from);
+
+    expect(poly.vars).toHaveLength(1);
+    expect(var_name(poly.type)).toBe(poly.vars[0]);
+    expect(var_name(poly.type)).not.toBe(declared.name);
+  });
+
   it("replaces variables free in the environment rather than sharing them", () => {
     const sub = new Substitution();
     // a function-parameter-style binding: an unbound var the binding does not declare
