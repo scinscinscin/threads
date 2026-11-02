@@ -1,0 +1,12 @@
+let is_even = function(n) {
+  if (n == 0) return true;
+  return is_odd(n - 1);
+};
+
+let is_odd = function(n) {
+  if (n == 0) return false;
+  return is_even(n - 1);
+};
+
+print(is_even(4));
+print(is_odd(7));
