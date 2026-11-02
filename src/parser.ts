@@ -39,7 +39,9 @@ import {
   TypeConcreteNode,
   TypeExpressionNode,
   TypeFunctionNode,
+  TypeObjectNode,
   TypeParametricNode,
+  TypePropertyNode,
 } from "./parser/nodes/types";
 
 type Reducer = (bag: any) => BaseNode;
@@ -150,6 +152,11 @@ const reducers = {
   type_array: (bag: { expr: TypeExpressionNode }) => new TypeArrayNode(bag.expr),
   type_func: (bag: { params?: ListNode<TypeExpressionNode>; return_type: TypeExpressionNode }) =>
     new TypeFunctionNode(bag.params?.get_items() ?? [], bag.return_type),
+  type_object: (bag: { type_properties: ListNode<TypePropertyNode> }) =>
+    new TypeObjectNode(bag.type_properties.get_items()),
+  type_properties: (bag: { type_property: TypePropertyNode; rest?: ListNode<TypePropertyNode> }) =>
+    new ListNode<TypePropertyNode>([bag.type_property, ...(bag.rest?.get_items() ?? [])]),
+  type_property: (bag: { key: Token; value: TypeExpressionNode }) => new TypePropertyNode(bag.key, bag.value),
   type_list: (bag: { type: TypeExpressionNode; rest?: ListNode<TypeExpressionNode> }) =>
     new ListNode<TypeExpressionNode>([bag.type, ...(bag.rest?.get_items() ?? [])]),
 

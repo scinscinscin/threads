@@ -1,6 +1,6 @@
 import { Token } from "../../lexer";
 import { create_type, resolve_type_name, TypeCheckError } from "../../typechecker";
-import { Term } from "../../typechecker/ast";
+import { Term, compound } from "../../typechecker/ast";
 import { BaseNode } from "./base";
 
 /**
@@ -76,5 +76,38 @@ export class TypeFunctionNode extends TypeExpressionNode {
 
   lower(): Term {
     return create_type("f", [...this.params.map((p) => p.lower()), this.return_type.lower()]);
+  }
+}
+
+/** A single field of an object type annotation: `key: T`. */
+export class TypePropertyNode extends BaseNode {
+  constructor(
+    public readonly key: Token,
+    public readonly value: TypeExpressionNode,
+  ) {
+    super();
+  }
+}
+
+/** An object type annotation: `{a: int; b: str}`. Fields are `;`-delimited,
+ *  keys are identifiers or string literals, and a field may not appear twice. */
+export class TypeObjectNode extends TypeExpressionNode {
+  constructor(public readonly properties: TypePropertyNode[]) {
+    super();
+  }
+
+  lower(): Term {
+    const entries: [string, Term][] = [];
+    const seen = new Set<string>();
+    for (const prop of this.properties) {
+      const key = prop.key.lexeme;
+      if (seen.has(key)) throw new TypeCheckError(`Duplicate property "${key}" in object type`, prop.key);
+      seen.add(key);
+      entries.push([key, prop.value.lower()]);
+    }
+
+    // Property entries are named compounds, not registered types, so they are
+    // built with raw `compound`; only the `obj` wrapper goes through create_type.
+    return create_type("obj", entries.map(([key, type]) => compound(key, [type])));
   }
 }

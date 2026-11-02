@@ -58,6 +58,9 @@
 <TYPE_EXPRESSION: type_param>: [IDENTIFIER: name] [LESS_THAN] <TYPE_LIST: args> [GREATER_THAN];
 <TYPE_EXPRESSION: type_array>: <TYPE_EXPRESSION: expr> [L_SQ_BRACE] [R_SQ_BRACE];
 <TYPE_EXPRESSION: type_func>: [L_PAREN] (<TYPE_LIST: params>)? [R_PAREN] [ARROW: arrow] <TYPE_EXPRESSION: return_type>;
+<TYPE_EXPRESSION: type_object>: [L_BRACE] <TYPE_PROPERTIES: type_properties> [R_BRACE];
+<TYPE_PROPERTIES: type_properties>: <TYPE_PROPERTY: type_property> ([SEMICOLON] <TYPE_PROPERTIES: rest>)?;
+<TYPE_PROPERTY: type_property>: [IDENTIFIER | STRING_LITERAL: key] [COLON] <TYPE_EXPRESSION: value>;
 <TYPE_LIST: type_list>: <TYPE_EXPRESSION: type> ([COMMA] <TYPE_LIST: rest>)?;
 
 <ASSIGNMENT_EXPRESSION: assignment_expr>: <IDENTIFIER_STACK_EXPRESSION: identifier_expr> ([EQUALS] <EXPRESSION: expr>)?;

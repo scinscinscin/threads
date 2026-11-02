@@ -1,4 +1,4 @@
-import { atom, compound, is_var, is_var_name, Term, Var, variable } from "./ast.js";
+import { atom, compound, is_compound, is_var, is_var_name, Term, Var, variable } from "./ast.js";
 
 /** A substitution as an immutable snapshot (Map of variable name to term). */
 export type Subst = Map<string, Term>;
@@ -115,6 +115,36 @@ export function unify_write(a: Term, b: Term, sub: Substitution): boolean {
       sub.unmark(m);
       return false;
     }
+  }
+
+  // Object types match properties by name, not position: the runtime
+  // ObjectValue is a keyed map, and key order is not semantically significant.
+  // Both sides must name the same set of keys, and corresponding types unify.
+  if (ra.functor === "obj" && rb.functor === "obj") {
+    // entries are always `compound(key, [type])` by construction; filter keeps
+    // TypeScript happy about the narrowing
+    const props_a = ra.args.filter(is_compound);
+    const props_b = rb.args.filter(is_compound);
+
+    for (const prop of props_a) {
+      /** .functor is the name of the property, try to find a candidate from A to B */
+      const candidate = props_b.find((e) => e.functor === prop.functor);
+
+      /** if property does not exist OR failed to unify types of both properties, reject */
+      if (candidate === undefined || !unify_write(prop.args[0], candidate.args[0], sub)) {
+        sub.unmark(m);
+        return false;
+      }
+    }
+
+    for (const prop of props_b) {
+      if (props_a.find((e) => e.functor === prop.functor) === undefined) {
+        sub.unmark(m);
+        return false;
+      }
+    }
+
+    return true;
   }
 
   // Same functions, unify arguments.

@@ -237,6 +237,23 @@ export function instantiate_binding(binding: Binding, sub: Substitution): Term {
   return apply_term(binding.poly.type, sub.fork());
 }
 
+/** Render a polytype for debugging: the body via `show_type`, prefixed with a
+ *  `forall` over the declared variables. When a substitution is given, the body is
+ *  resolved through it first so placeholder classes constrained later (e.g. by a
+ *  forward-referenced declaration committing its type) show their final shape.
+ *  The polytype's own declared variables are excluded from the snapshot: reads of
+ *  the binding instantiate them in the shared substitution, but they must still
+ *  display as the polytype's bound names. */
+export function show_polytype(poly: PolyType, sub?: Substitution): string {
+  const declared = new Set(poly.vars);
+  const t =
+    sub === undefined
+      ? poly.type
+      : apply_term(poly.type, new Map([...sub.map].filter(([name]) => !declared.has(name))));
+  const body = show_type(t);
+  return poly.vars.length === 0 ? body : `forall ${poly.vars.join(", ")}. ${body}`;
+}
+
 const globals = {
   print: create_binding({ vars: [], type: create_type("f", [create_type("any"), create_type("bool")]) }, false, true),
   resolve: create_binding(
@@ -246,7 +263,9 @@ const globals = {
   ),
 } as { [key: string]: Binding };
 
-export function typecheck(program: ProgramNode): void {
+/** Typecheck a program; returns the final top-level environment (every declaration
+ *  with its committed polytype) and the accumulated substitution, for debugging. */
+export function typecheck(program: ProgramNode): { env: TypeEnvironment; sub: Substitution } {
   reset_fresh_vars();
 
   const substitution = new Substitution();
@@ -284,4 +303,5 @@ export function typecheck(program: ProgramNode): void {
     const r = create_type("void");
     environment2 = stmt.typecheck(environment2, all_environment, substitution, r);
   }
+  return { env: environment2, sub: substitution };
 }

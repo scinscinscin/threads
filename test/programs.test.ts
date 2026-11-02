@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parse_program } from "../src/parser";
-import { TypeCheckError, typecheck } from "../src/typechecker";
+import { show_polytype, TypeCheckError, typecheck } from "../src/typechecker";
 
 function typecheck_source(source: string): void {
   typecheck(parse_program(source));
@@ -410,6 +410,117 @@ let x: int<bool> = 1;
   });
 });
 
+describe("typechecker: object type annotations (accepted)", () => {
+  it("annotates a variable with an object type", () => {
+    typecheck_source(`
+let p: {a: int; b: str} = {a: 1, b: "s"};
+print(p.a + 1);
+print(p.b);
+`);
+  });
+
+  it("matches fields by name, not position", () => {
+    typecheck_source(`
+let p: {a: int; b: str} = {b: "s", a: 1};
+print(p.a);
+`);
+  });
+
+  it("annotates nested object types", () => {
+    typecheck_source(`
+let p: {outer: {x: int}} = {outer: {x: 2}};
+print(p.outer.x);
+`);
+  });
+
+  it("annotates arrays of objects", () => {
+    typecheck_source(`
+let arr: {v: int}[] = [{v: 1}, {v: 2}];
+print(arr[1].v);
+`);
+  });
+
+  it("annotates function and promise fields", () => {
+    typecheck_source(`
+let f: {apply: (int) => int} = {apply: function(x: int): int {
+  return x + 1;
+}};
+print(f.apply(1));
+let p: {q: Promise<int>} = {q: resolve()};
+print(await p.q);
+`);
+  });
+
+  it("annotates fields with string literal keys", () => {
+    // one double-quoted string per line: the lexer's string rule (pre-existing)
+    // swallows up to the last quote on a line
+    typecheck_source(`
+let p: {"my key": int;
+  a: str} = {
+  "my key": 3,
+  a: "s"
+};
+print(p["my key"]);
+`);
+  });
+
+  it("annotates function parameters with object types", () => {
+    typecheck_source(`
+let bump = function(p: {a: int}): int {
+  return p.a + 1;
+};
+print(bump({a: 5}));
+`);
+  });
+});
+
+describe("typechecker: object type annotations (rejected)", () => {
+  it("rejects a field with the wrong type", () => {
+    expect_type_error(
+      `
+let p: {a: int} = {a: "s"};
+`,
+      `Initializer for "p": got obj(a: str), expected obj(a: int)`,
+    );
+  });
+
+  it("rejects a literal missing an annotated field", () => {
+    expect_type_error(
+      `
+let p: {a: int; b: str} = {a: 1};
+`,
+      `Initializer for "p": got obj(a: int), expected obj(a: int, b: str)`,
+    );
+  });
+
+  it("rejects a literal with an extra field", () => {
+    expect_type_error(
+      `
+let p: {a: int} = {a: 1, b: 2};
+`,
+      `Initializer for "p": got obj(a: int, b: int), expected obj(a: int)`,
+    );
+  });
+
+  it("rejects duplicate field names in an object type", () => {
+    expect_type_error(
+      `
+let p: {a: int; a: str} = {a: 1};
+`,
+      `Duplicate property "a" in object type`,
+    );
+  });
+
+  it("rejects an unknown type name in a field", () => {
+    expect_type_error(
+      `
+let p: {a: float} = {a: 1};
+`,
+      `Unknown type name: "float"`,
+    );
+  });
+});
+
 describe("typechecker: deferred function bodies (accepted)", () => {
   it("typechecks a body that references a function declared later", () => {
     typecheck_source(`
@@ -509,6 +620,22 @@ let later = function() {
 };
 print(f());
 `);
+  });
+
+  it("returns the final environment with committed types", () => {
+    const { env, sub } = typecheck(parse_program(`
+let early = function() {
+  return after();
+};
+let after = function() {
+  return 1;
+};
+`));
+    // early committed against after's placeholder; after's commit bound that
+    // placeholder to int, and the final display resolves it (nullary functions
+    // are f(R), shown without the -> sugar)
+    expect(show_polytype(env.get("early")!.poly, sub)).toBe("f(int)");
+    expect(show_polytype(env.get("after")!.poly, sub)).toBe("f(int)");
   });
 });
 

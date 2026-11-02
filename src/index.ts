@@ -2,14 +2,18 @@ import fs from "fs/promises";
 import path from "path";
 import { Interpreter } from "./interpreter";
 import { parse_program } from "./parser";
-import { TypeCheckError, typecheck } from "./typechecker";
+import { VariableDeclarationNode } from "./parser/nodes/statements";
+import { show_polytype, TypeCheckError, typecheck } from "./typechecker";
 
 async function main() {
-  const file = process.argv[2] ?? path.resolve(process.cwd(), "example_program.lol");
+  const args = process.argv.slice(2);
+  const debug_types = args.includes("--debug-types");
+  const file = args.find((a) => !a.startsWith("--")) ?? path.resolve(process.cwd(), "example_program.lol");
   const program = parse_program(await fs.readFile(file, "utf8"));
 
+  let checked: ReturnType<typeof typecheck>;
   try {
-    typecheck(program);
+    checked = typecheck(program);
   } catch (error) {
     if (error instanceof TypeCheckError) {
       const position = error.token === undefined ? "" : ` (${error.token.line}:${error.token.column})`;
@@ -17,6 +21,22 @@ async function main() {
       process.exit(1);
     }
     throw error;
+  }
+
+  // --debug-types: report the type each top-level declaration committed to.
+  // Printed to stderr so the program's stdout stays clean.
+  if (debug_types) {
+    for (const stmt of program.statements.get_items()) {
+      if (!(stmt instanceof VariableDeclarationNode)) continue;
+      const binding = checked.env.get(stmt.variable_name.lexeme);
+      if (binding === undefined) continue;
+      console.error(
+        `[types] ${stmt.variable_name.line}:${stmt.variable_name.column} ${stmt.variable_name.lexeme} : ${show_polytype(
+          binding.poly,
+          checked.sub,
+        )}`,
+      );
+    }
   }
 
   const interpreter = new Interpreter(program.statements.get_items());
