@@ -4,6 +4,7 @@ import { Interpreter } from "./interpreter";
 import { parse_program } from "./parser";
 import { VariableDeclarationNode } from "./parser/nodes/statements";
 import { show_polytype, TypeCheckError, typecheck } from "./typechecker";
+import { compound, show_type, variable } from "./typechecker/ast";
 
 async function main() {
   const args = process.argv.slice(2);
@@ -36,6 +37,19 @@ async function main() {
           checked.sub,
         )}`,
       );
+    }
+
+    for (const { name, name_token, record } of checked.ctx.aliases.top_level()) {
+      const shown = show_type(
+        record.kind === "complete"
+          ? record.term
+          : compound(
+              record.registry,
+              Array.from({ length: record.arity }, () => variable("t")),
+            ),
+      );
+
+      console.error(`[types] ${name_token.line}:${name_token.column} type ${name} = ${shown}`);
     }
   }
 

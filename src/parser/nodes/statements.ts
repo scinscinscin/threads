@@ -5,9 +5,9 @@ import {
   check_unify,
   create_binding,
   create_type,
-  get_fresh_counter_value,
-  fresh_var,
   generalize,
+  ResolvedType,
+  TypecheckContext,
   TypeEnvironment,
 } from "../../typechecker";
 import { show_type, Term, variable } from "../../typechecker/ast";
@@ -31,7 +31,13 @@ export abstract class StatementNode extends BaseNode {
    * environment (every declaration in scope, unprocessed ones as placeholders)
    * that function bodies see.
    */
-  abstract typecheck(e: TypeEnvironment, e_all: TypeEnvironment, sub: Substitution, r: Term): TypeEnvironment;
+  abstract typecheck(
+    e: TypeEnvironment,
+    e_all: TypeEnvironment,
+    sub: Substitution,
+    r: Term,
+    ctx: TypecheckContext,
+  ): TypeEnvironment;
 }
 
 export class BlockStatementNode extends StatementNode {
@@ -49,10 +55,17 @@ export class BlockStatementNode extends StatementNode {
     return thread.suspended_or_ok();
   }
 
-  typecheck(e: TypeEnvironment, e_all: TypeEnvironment, sub: Substitution, r: Term): TypeEnvironment {
+  typecheck(e: TypeEnvironment, e_all: TypeEnvironment, sub: Substitution, r: Term, ctx: TypecheckContext): TypeEnvironment {
     let e2 = new Map(e);
     let e_all2 = new Map(e_all);
-    for (const st of this.statements.get_items()) e2 = st.typecheck(e2, e_all2, sub, r);
+    // Type aliases are scoped per block just like value bindings: the block
+    // gets its own alias scope, so aliases declared inside do not leak out.
+    ctx.aliases.push_scope();
+    try {
+      for (const st of this.statements.get_items()) e2 = st.typecheck(e2, e_all2, sub, r, ctx);
+    } finally {
+      ctx.aliases.pop_scope();
+    }
     return e;
   }
 }
@@ -102,7 +115,7 @@ export class VariableDeclarationNode extends StatementNode {
     return thread.suspended_or_ok();
   }
 
-  typecheck(e: TypeEnvironment, e_all: TypeEnvironment, sub: Substitution, r: Term): TypeEnvironment {
+  typecheck(e: TypeEnvironment, e_all: TypeEnvironment, sub: Substitution, r: Term, ctx: TypecheckContext): TypeEnvironment {
     const name = this.variable_name.lexeme;
     const env2: TypeEnvironment = new Map(e);
 
@@ -110,9 +123,9 @@ export class VariableDeclarationNode extends StatementNode {
     // monomorphic: annotations cannot contain type variables, so there is
     // nothing to generalize
     if (this.type !== null) {
-      const annotated_type = this.type.lower();
+      const annotated_type = this.type.lower(ctx);
       if (this.value !== null)
-        check_unify(this.value.infer(e, sub, e_all), annotated_type, sub, `Initializer for "${name}"`);
+        check_unify(this.value.infer(e, sub, ctx, e_all), annotated_type, sub, `Initializer for "${name}"`);
 
       if (this.registered !== undefined) {
         this.registered.poly = { vars: [], type: annotated_type };
@@ -128,8 +141,8 @@ export class VariableDeclarationNode extends StatementNode {
 
     // `let x;` starts as null at runtime but accepts any later assignment,
     // so it is typed with an unconstrained variable the first assignment pins
-    const before = get_fresh_counter_value();
-    const variable_type = this.value == null ? fresh_var() : this.value.infer(e, sub, e_all);
+    const before = ctx.fresh.value();
+    const variable_type = this.value == null ? ctx.fresh.next() : this.value.infer(e, sub, ctx, e_all);
 
     // a pre-registered declaration carries a placeholder variable: commit the
     // inferred type to it so function bodies already checked against this
@@ -138,15 +151,51 @@ export class VariableDeclarationNode extends StatementNode {
     // live environment's overwrite semantics
     if (this.registered !== undefined && this.registered.placeholder !== undefined) {
       check_unify(variable_type, variable(this.registered.placeholder), sub, `Type of "${name}"`, this.variable_name);
-      this.registered.poly = generalize(variable_type, e_all, sub, before, this.registered.placeholder);
+      this.registered.poly = generalize(variable_type, e_all, sub, before, ctx, this.registered.placeholder);
       env2.set(name, this.registered);
       return env2;
     }
 
-    const binding = create_binding(generalize(variable_type, e_all, sub, before), true);
+    const binding = create_binding(generalize(variable_type, e_all, sub, before, ctx), true);
     env2.set(name, binding);
     e_all.set(name, binding);
     return env2;
+  }
+}
+
+/** A type alias declaration: `type Name = <type expr>:`. Purely static -- a
+ *  runtime no-op that registers `Name` in the enclosing alias scope, where it
+ *  resolves to the target type expression at every type position. */
+export class TypeDeclarationNode extends StatementNode {
+  constructor(
+    public readonly name: Token,
+    public readonly type: TypeExpressionNode,
+  ) {
+    super();
+  }
+
+  /** The record the typechecker registered for this declaration (top-level
+   *  only); set by the `typecheck` driver's pre-scan, not the parser. */
+  registered?: ResolvedType;
+
+  execute(): StatementOutcome {
+    // Aliases live only in the typechecker's name table; no runtime effect.
+    return { kind: "ok" };
+  }
+
+  typecheck(
+    e: TypeEnvironment,
+    _e_all: TypeEnvironment,
+    _sub: Substitution,
+    _r: Term,
+    ctx: TypecheckContext,
+  ): TypeEnvironment {
+    if (this.registered === undefined) {
+      ctx.aliases.declare(this.name, this.type);
+      this.registered = ctx.aliases.record(this.name.lexeme);
+    }
+
+    return e;
   }
 }
 
@@ -168,8 +217,8 @@ export class ReturnStatementNode extends StatementNode {
     return thread.suspended_or_ok();
   }
 
-  typecheck(e: TypeEnvironment, e_all: TypeEnvironment, sub: Substitution, r: Term): TypeEnvironment {
-    if (this.expr) this.expr.check(r, e, sub, e_all);
+  typecheck(e: TypeEnvironment, e_all: TypeEnvironment, sub: Substitution, r: Term, ctx: TypecheckContext): TypeEnvironment {
+    if (this.expr) this.expr.check(r, e, sub, ctx, e_all);
     else if (!is_void(r, sub))
       throw new Error(`missing return value: function returns ${show_type(resolve(r, sub.map))}`);
     return e;
@@ -186,8 +235,8 @@ export class ExpressionStatementNode extends StatementNode {
     return thread.suspended_or_ok();
   }
 
-  typecheck(e: TypeEnvironment, e_all: TypeEnvironment, sub: Substitution, r: Term): TypeEnvironment {
-    this.expr.infer(e, sub, e_all);
+  typecheck(e: TypeEnvironment, e_all: TypeEnvironment, sub: Substitution, r: Term, ctx: TypecheckContext): TypeEnvironment {
+    this.expr.infer(e, sub, ctx, e_all);
     return e;
   }
 }
@@ -211,10 +260,10 @@ export class IfStatementNode extends StatementNode {
     return thread.suspended_or_ok();
   }
 
-  typecheck(e: TypeEnvironment, e_all: TypeEnvironment, sub: Substitution, r: Term): TypeEnvironment {
-    this.condition.check(create_type("bool"), e, sub, e_all);
-    this.then_body.typecheck(e, e_all, sub, r);
-    if (this.else_body) this.else_body.typecheck(e, e_all, sub, r);
+  typecheck(e: TypeEnvironment, e_all: TypeEnvironment, sub: Substitution, r: Term, ctx: TypecheckContext): TypeEnvironment {
+    this.condition.check(create_type("bool"), e, sub, ctx, e_all);
+    this.then_body.typecheck(e, e_all, sub, r, ctx);
+    if (this.else_body) this.else_body.typecheck(e, e_all, sub, r, ctx);
     return e;
   }
 }
@@ -239,8 +288,8 @@ class LoopConditionNode extends StatementNode {
     return thread.suspended_or_ok();
   }
 
-  typecheck(e: TypeEnvironment, e_all: TypeEnvironment, sub: Substitution, r: Term): TypeEnvironment {
-    if (this.condition) this.condition.check(create_type("bool"), e, sub, e_all);
+  typecheck(e: TypeEnvironment, e_all: TypeEnvironment, sub: Substitution, r: Term, ctx: TypecheckContext): TypeEnvironment {
+    if (this.condition) this.condition.check(create_type("bool"), e, sub, ctx, e_all);
     return e;
   }
 }
@@ -293,10 +342,10 @@ export class WhileStatementNode extends StatementNode {
     return run_loop(thread, frame, interpreter, [new LoopConditionNode(this.condition), this.body], 0, 0, this.label);
   }
 
-  typecheck(e: TypeEnvironment, e_all: TypeEnvironment, sub: Substitution, r: Term): TypeEnvironment {
-    if (this.condition) this.condition.check(create_type("bool"), e, sub, e_all);
+  typecheck(e: TypeEnvironment, e_all: TypeEnvironment, sub: Substitution, r: Term, ctx: TypecheckContext): TypeEnvironment {
+    if (this.condition) this.condition.check(create_type("bool"), e, sub, ctx, e_all);
     // the loop runs in a forked environment, so its variables do not leak out
-    this.body.typecheck(new Map(e), new Map(e_all), sub, r);
+    this.body.typecheck(new Map(e), new Map(e_all), sub, r, ctx);
     return e;
   }
 }
@@ -314,10 +363,10 @@ export class DoWhileStatementNode extends StatementNode {
     return run_loop(thread, frame, interpreter, [this.body, new LoopConditionNode(this.condition)], 0, 1, this.label);
   }
 
-  typecheck(e: TypeEnvironment, e_all: TypeEnvironment, sub: Substitution, r: Term): TypeEnvironment {
-    if (this.condition) this.condition.check(create_type("bool"), e, sub, e_all);
+  typecheck(e: TypeEnvironment, e_all: TypeEnvironment, sub: Substitution, r: Term, ctx: TypecheckContext): TypeEnvironment {
+    if (this.condition) this.condition.check(create_type("bool"), e, sub, ctx, e_all);
     // the loop runs in a forked environment, so its variables do not leak out
-    this.body.typecheck(new Map(e), new Map(e_all), sub, r);
+    this.body.typecheck(new Map(e), new Map(e_all), sub, r, ctx);
     return e;
   }
 }
@@ -348,14 +397,14 @@ export class ForStatementNode extends StatementNode {
     return run_loop(thread, frame, interpreter, statements, condition_index, continue_index, this.label);
   }
 
-  typecheck(e: TypeEnvironment, e_all: TypeEnvironment, sub: Substitution, r: Term): TypeEnvironment {
+  typecheck(e: TypeEnvironment, e_all: TypeEnvironment, sub: Substitution, r: Term, ctx: TypecheckContext): TypeEnvironment {
     // the loop runs in a forked environment, so its variables do not leak out
     const loop_env_all = new Map(e_all);
     let loop_env = new Map(e);
-    if (this.init) loop_env = this.init.typecheck(loop_env, loop_env_all, sub, r);
-    if (this.condition) this.condition.check(create_type("bool"), loop_env, sub, loop_env_all);
-    this.body.typecheck(loop_env, loop_env_all, sub, r);
-    if (this.update) this.update.infer(loop_env, sub, loop_env_all);
+    if (this.init) loop_env = this.init.typecheck(loop_env, loop_env_all, sub, r, ctx);
+    if (this.condition) this.condition.check(create_type("bool"), loop_env, sub, ctx, loop_env_all);
+    this.body.typecheck(loop_env, loop_env_all, sub, r, ctx);
+    if (this.update) this.update.infer(loop_env, sub, ctx, loop_env_all);
     return e;
   }
 }

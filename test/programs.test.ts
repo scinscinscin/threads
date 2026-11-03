@@ -691,3 +691,195 @@ let s: str = f();
     );
   });
 });
+
+describe("typechecker: type aliases (accepted)", () => {
+  it("aliases a built-in type name", () => {
+    typecheck_source(`
+type Pos = int:
+let x: Pos = 5;
+print(x + 1);
+`);
+  });
+
+  it("aliases a complete parametric type", () => {
+    typecheck_source(`
+type P = Promise<int>:
+let x: P = resolve();
+print(await x);
+`);
+  });
+
+  it("aliases a parametric name and uses it with its type argument", () => {
+    typecheck_source(`
+type P = Promise:
+let x: P<int> = resolve();
+print(await x);
+`);
+  });
+
+  it("aliases array, function, and object types", () => {
+    typecheck_source(`
+type Ints = int[]:
+let a: Ints = [1, 2];
+print(a[0] + a[1]);
+type Inc = (int) => int:
+let f: Inc = function(x) {
+  return x + 1;
+};
+print(f(1));
+type Point = {x: Ints; y: int}:
+let p: Point = {x: [3], y: 4};
+print(p.x[0] + p.y);
+`);
+  });
+
+  it("chains an alias to another alias", () => {
+    typecheck_source(`
+type Ints = int[]:
+type Numbers = Ints:
+let a: Numbers = [1];
+print(a[0]);
+type Q = Promise<int>:
+type R = Q:
+let p: R = resolve();
+print(await p);
+`);
+  });
+
+  it("uses an alias in parameter and return annotations", () => {
+    typecheck_source(`
+type Pos = int:
+let add = function(a: Pos, b: Pos): Pos {
+  return a + b;
+};
+print(add(1, 2));
+`);
+  });
+
+  it("uses an alias in a for-loop initializer", () => {
+    typecheck_source(`
+type Pos = int:
+let total = 0;
+for (let i: Pos = 0; i < 3; i = i + 1) {
+  total = total + i;
+}
+print(total);
+`);
+  });
+
+  it("resolves an alias declared after a top-level function that uses it", () => {
+    typecheck_source(`
+let f = function(): P {
+  return 1;
+};
+type P = int:
+print(f());
+`);
+  });
+
+  it("scopes a block-local alias to its block and allows shadowing", () => {
+    typecheck_source(`
+type A = str:
+{
+  type A = int:
+  let x: A = 1;
+  print(x);
+}
+let y: A = "s";
+print(y);
+`);
+  });
+
+  it("sees a block-local alias from a function defined in the same block", () => {
+    typecheck_source(`
+{
+  type A = int:
+  let f = function(): A {
+    return 3;
+  };
+  print(f());
+}
+`);
+  });
+});
+
+describe("typechecker: type aliases (rejected)", () => {
+  it("rejects an unknown type name in an alias target", () => {
+    expect_type_error(
+      `
+type A = float:
+`,
+      `Unknown type name: "float"`,
+    );
+  });
+
+  it("rejects aliasing a built-in type name", () => {
+    expect_type_error(
+      `
+type int = str:
+`,
+      `Cannot define a type alias for the built-in type name "int"`,
+    );
+  });
+
+  it("rejects a duplicate top-level alias", () => {
+    expect_type_error(
+      `
+type A = int:
+type A = str:
+let x: A = 1;
+`,
+      `Duplicate type alias "A"`,
+    );
+  });
+
+  it("rejects a bare use of a parametric alias", () => {
+    expect_type_error(
+      `
+type P = Promise:
+let x: P = 1;
+`,
+      `Type "P" requires a type argument`,
+    );
+  });
+
+  it("rejects type arguments on a complete alias", () => {
+    expect_type_error(
+      `
+type P = Promise<int>:
+let x: P<str> = 1;
+`,
+      `Type "P" takes no type arguments`,
+    );
+  });
+
+  it("rejects the wrong number of type arguments on a parametric alias", () => {
+    expect_type_error(
+      `
+type P = Promise:
+let x: P<int, str> = 1;
+`,
+      `Type "P" takes 1 type argument, got 2`,
+    );
+  });
+
+  it("rejects a circular alias definition", () => {
+    expect_type_error(
+      `
+type A = B:
+type B = A:
+let x: A = 1;
+`,
+      `Circular type alias definition: "A"`,
+    );
+  });
+
+  it("rejects a self-referential alias", () => {
+    expect_type_error(
+      `
+type A = A:
+`,
+      `Circular type alias definition: "A"`,
+    );
+  });
+});

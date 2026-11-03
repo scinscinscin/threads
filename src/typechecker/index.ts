@@ -1,6 +1,7 @@
 import { Token } from "../lexer";
 import { ProgramNode } from "../parser/nodes/base";
-import { VariableDeclarationNode } from "../parser/nodes/statements";
+import { TypeDeclarationNode, VariableDeclarationNode } from "../parser/nodes/statements";
+import { TypeConcreteNode, TypeExpressionNode } from "../parser/nodes/types";
 import { atom, compound, is_compound, show_type, Term, Var, variable } from "./ast";
 import { apply_term, resolve, Substitution, unify_write } from "./unify";
 
@@ -48,13 +49,6 @@ const type_names: Record<string, TypeNameInfo> = {
   Promise: { registry: "promise", arity: 1 },
 };
 
-/** Resolve a type name written in an annotation; unknown names are a type error. */
-export function resolve_type_name(name: string, token?: Token): TypeNameInfo {
-  const info = type_names[name];
-  if (info !== undefined) return info;
-  throw new TypeCheckError(`Unknown type name: "${name}"`, token);
-}
-
 /** The value type of `obj.key` for an `obj`-typed term, or null when absent or not an object. */
 export function object_property_type(obj: Term, key: string): Term | null {
   if (!is_compound(obj) || obj.functor !== "obj") return null;
@@ -65,17 +59,20 @@ export function object_property_type(obj: Term, key: string): Term | null {
   return null;
 }
 
-/** Mint fresh type variables with unique names; reset at the start of each typecheck pass. */
-let fresh_counter = 0;
-export function fresh_var(): Var {
-  return variable(`t${fresh_counter++}`);
-}
-export function reset_fresh_vars(): void {
-  fresh_counter = 0;
-}
-/** Current counter value; snapshot it before an infer to scope `generalize` to that infer. */
-export function get_fresh_counter_value(): number {
-  return fresh_counter;
+/** Mints fresh type variables (`t0`, `t1`, ...) for one typecheck pass. Each
+ *  pass owns its generator, so concurrent passes mint independently. */
+export class FreshVarGenerator {
+  private counter = 0;
+
+  /** The next unused variable. */
+  next(): Var {
+    return variable(`t${this.counter++}`);
+  }
+
+  /** Current counter value; snapshot it before an infer to scope `generalize` to that infer. */
+  value(): number {
+    return this.counter;
+  }
 }
 
 export class TypeCheckError extends Error {
@@ -88,14 +85,134 @@ export class TypeCheckError extends Error {
   }
 }
 
+/** The resolved form of a type name, whether it names a type alias or a
+ *  built-in: either a complete type, or a parametric name that still awaits
+ *  its type argument at the use site. */
+export type ResolvedType = { kind: "complete"; term: Term } | { kind: "parametric"; registry: string; arity: number };
+
+type AliasEntry = {
+  name: string;
+  name_token: Token;
+  target: TypeExpressionNode;
+  record: ResolvedType | null;
+  computing: boolean;
+};
+
+/** Block-scoped type alias table for one typecheck pass. Aliases are scoped
+ *  per block like value bindings, but they live in the type namespace: a scope
+ *  is pushed for each block, and top-level aliases are pre-registered in the
+ *  outermost scope at the start of the pass. The owning context is kept so a
+ *  non-bare-name target (`type P = Promise<int>:`) can be lowered. */
+export class AliasTable {
+  private scopes: Array<Map<string, AliasEntry>> = [new Map()];
+
+  constructor(private readonly ctx: TypecheckContext) {}
+
+  push_scope(): void {
+    this.scopes.push(new Map());
+  }
+
+  pop_scope(): void {
+    const scope = this.scopes.pop();
+    if (scope === undefined) throw new Error("Popped more type alias scopes than were pushed");
+  }
+
+  /** Register a new alias in the innermost scope. The name must not be a
+   *  built-in type name and must not already be bound in the same scope
+   *  (shadowing outer scopes is allowed, mirroring lets). */
+  declare(name_token: Token, target: TypeExpressionNode): void {
+    const name = name_token.lexeme;
+    if (type_names[name] !== undefined)
+      throw new TypeCheckError(`Cannot define a type alias for the built-in type name "${name}"`, name_token);
+
+    const scope = this.scopes[this.scopes.length - 1];
+    if (scope.has(name)) throw new TypeCheckError(`Duplicate type alias "${name}"`, name_token);
+    scope.set(name, { name, name_token, target, record: null, computing: false });
+  }
+
+  /** The record of a declared alias; throws a plain error when the name was
+   *  never declared (a driver bug, not a type error). */
+  record(name: string): ResolvedType {
+    const entry = this.find_entry(name);
+    if (entry === undefined) throw new Error(`Type alias "${name}" is not declared`);
+    return this.compute_record(entry);
+  }
+
+  /** Resolve a type name written in an annotation: type aliases first (so an
+   *  alias may chain onto other aliases and built-in names), then built-in
+   *  type names. Unknown names are a type error. This is the single
+   *  resolution path used by every `TypeExpressionNode.lower`, so alias
+   *  handling is transparent to the node implementations. */
+  resolve(name: string, token?: Token): ResolvedType {
+    const entry = this.find_entry(name);
+    if (entry !== undefined) return this.compute_record(entry);
+
+    const info = type_names[name];
+    if (info === undefined) throw new TypeCheckError(`Unknown type name: "${name}"`, token);
+    return info.arity === 0
+      ? { kind: "complete", term: create_type(info.registry) }
+      : { kind: "parametric", registry: info.registry, arity: info.arity };
+  }
+
+  /** The top-level aliases with their computed records; reported by --debug-types. */
+  top_level(): { name: string; name_token: Token; record: ResolvedType }[] {
+    const scope = this.scopes[this.scopes.length - 1];
+    return [...scope.values()].map((entry) => ({
+      name: entry.name,
+      name_token: entry.name_token,
+      record: entry.record!,
+    }));
+  }
+
+  /** Find an alias entry by name, walking the scopes innermost-first. */
+  private find_entry(name: string): AliasEntry | undefined {
+    for (let i = this.scopes.length - 1; i >= 0; i--) {
+      const entry = this.scopes[i].get(name);
+      if (entry !== undefined) return entry;
+    }
+    return undefined;
+  }
+
+  /** Compute (and memoize) an alias's record. A re-entrant computation is a
+   *  circular alias definition. */
+  private compute_record(entry: AliasEntry): ResolvedType {
+    if (entry.record !== null) return entry.record;
+    if (entry.computing) throw new TypeCheckError(`Circular type alias definition: "${entry.name}"`, entry.name_token);
+
+    entry.computing = true;
+    try {
+      entry.record = this.lower_target(entry.target);
+    } finally {
+      entry.computing = false;
+    }
+
+    return entry.record;
+  }
+
+  /** Lower an alias target to a record. A bare name goes through the unified
+   *  resolver (which handles alias chains and built-in names); any other target
+   *  node lowers to a complete type. */
+  private lower_target(target: TypeExpressionNode): ResolvedType {
+    if (target instanceof TypeConcreteNode) return this.resolve(target.name.lexeme, target.name);
+    return { kind: "complete", term: target.lower(this.ctx) };
+  }
+}
+
+/** All mutable state of one typecheck pass, instantiated at the root and
+ *  threaded through the checker as a single `ctx` parameter, so multiple
+ *  passes (separate programs, nested passes) run independently. */
+export class TypecheckContext {
+  readonly fresh: FreshVarGenerator;
+  readonly aliases: AliasTable;
+
+  constructor() {
+    this.fresh = new FreshVarGenerator();
+    this.aliases = new AliasTable(this);
+  }
+}
+
 /** Unify two types, throwing a TypeCheckError with both rendered types on failure. */
-export function check_unify(
-  actual: Term,
-  expected: Term,
-  sub: Substitution,
-  message?: string,
-  token?: Token,
-): void {
+export function check_unify(actual: Term, expected: Term, sub: Substitution, message?: string, token?: Token): void {
   if (!unify_write(actual, expected, sub)) {
     throw new TypeCheckError(
       `${message ?? "Type mismatch"}: got ${show_type(resolve(actual, sub.map))}, expected ${show_type(
@@ -114,12 +231,12 @@ export type PolyType = { vars: string[]; type: Term };
  *  processed, and `generalize` keeps variables of other placeholders' classes
  *  undeclared so their constraints survive. */
 export type Binding = { poly: PolyType; mutable: boolean; builtin?: boolean; placeholder?: string };
-export const create_binding = (
-  poly: PolyType,
-  mutable = false,
-  builtin = false,
-  placeholder?: string,
-): Binding => ({ poly, mutable, builtin, placeholder });
+export const create_binding = (poly: PolyType, mutable = false, builtin = false, placeholder?: string): Binding => ({
+  poly,
+  mutable,
+  builtin,
+  placeholder,
+});
 
 export type TypeEnvironment = Map<string, Binding>;
 
@@ -165,7 +282,14 @@ export function env_free_vars(e: TypeEnvironment): Set<string> {
  * overwrite the constraint on each read. Returns the polytype with the stored
  * (frozen) type.
  */
-export function generalize(t: Term, e: TypeEnvironment, sub: Substitution, from: number, self?: string): PolyType {
+export function generalize(
+  t: Term,
+  e: TypeEnvironment,
+  sub: Substitution,
+  from: number,
+  ctx: TypecheckContext,
+  self?: string,
+): PolyType {
   // get the variables inside
   const env_free = env_free_vars(e);
 
@@ -209,7 +333,7 @@ export function generalize(t: Term, e: TypeEnvironment, sub: Substitution, from:
     if (resolved.kind === "compound") return compound(resolved.functor, resolved.args.map(freeze));
 
     const index = Number(resolved.name.slice(1));
-    if (index >= from && index < fresh_counter) {
+    if (index >= from && index < ctx.fresh.value()) {
       declare(resolved);
       return resolved;
     }
@@ -218,7 +342,7 @@ export function generalize(t: Term, e: TypeEnvironment, sub: Substitution, from:
 
     let replacement = replacements.get(resolved.name);
     if (replacement === undefined) {
-      replacement = fresh_var();
+      replacement = ctx.fresh.next();
       replacements.set(resolved.name, replacement);
       declare(replacement);
     }
@@ -232,8 +356,8 @@ export function generalize(t: Term, e: TypeEnvironment, sub: Substitution, from:
 
 /** Instantiate a binding's polytype: a fresh variable for each declared var, then apply
  *  the substitution. Every read of a polymorphic binding gets an independent instance. */
-export function instantiate_binding(binding: Binding, sub: Substitution): Term {
-  for (const v of binding.poly.vars) sub.bind(v, fresh_var());
+export function instantiate_binding(binding: Binding, sub: Substitution, ctx: TypecheckContext): Term {
+  for (const v of binding.poly.vars) sub.bind(v, ctx.fresh.next());
   return apply_term(binding.poly.type, sub.fork());
 }
 
@@ -264,13 +388,25 @@ const globals = {
 } as { [key: string]: Binding };
 
 /** Typecheck a program; returns the final top-level environment (every declaration
- *  with its committed polytype) and the accumulated substitution, for debugging. */
-export function typecheck(program: ProgramNode): { env: TypeEnvironment; sub: Substitution } {
-  reset_fresh_vars();
+ *  with its committed polytype), the accumulated substitution, and the pass's
+ *  context (alias table and fresh variable generator), for debugging. */
+export function typecheck(program: ProgramNode): { env: TypeEnvironment; sub: Substitution; ctx: TypecheckContext } {
+  const ctx = new TypecheckContext();
 
   const substitution = new Substitution();
   const environment = new Map<string, Binding>(Object.entries(globals));
   const all_environment: TypeEnvironment = new Map(environment);
+
+  // Pre-register the top-level type aliases in the outermost alias scope so
+  // they can be referenced from anywhere in the program, including function
+  // bodies that appear before the declaration (mirroring the let pre-scan).
+  // Two passes: all names are declared first, then all records are computed,
+  // so top-level aliases may reference each other in any order.
+  for (const stmt of program.statements.get_items())
+    if (stmt instanceof TypeDeclarationNode) ctx.aliases.declare(stmt.name, stmt.type);
+
+  for (const stmt of program.statements.get_items())
+    if (stmt instanceof TypeDeclarationNode) stmt.registered = ctx.aliases.record(stmt.name.lexeme);
 
   // Pre-register the top-level declarations in all_environment so that function
   // bodies can reference declarations that come after them (a closure sees the
@@ -290,9 +426,9 @@ export function typecheck(program: ProgramNode): { env: TypeEnvironment; sub: Su
     if (!(stmt instanceof VariableDeclarationNode)) continue;
     if (name_counts.get(stmt.variable_name.lexeme) !== 1) continue;
     if (stmt.type !== null) {
-      stmt.registered = create_binding({ vars: [], type: stmt.type.lower() }, true);
+      stmt.registered = create_binding({ vars: [], type: stmt.type.lower(ctx) }, true);
     } else {
-      const placeholder = fresh_var();
+      const placeholder = ctx.fresh.next();
       stmt.registered = create_binding({ vars: [], type: placeholder }, true, false, placeholder.name);
     }
     all_environment.set(stmt.variable_name.lexeme, stmt.registered);
@@ -301,7 +437,7 @@ export function typecheck(program: ProgramNode): { env: TypeEnvironment; sub: Su
   let environment2 = environment;
   for (const stmt of program.statements.get_items()) {
     const r = create_type("void");
-    environment2 = stmt.typecheck(environment2, all_environment, substitution, r);
+    environment2 = stmt.typecheck(environment2, all_environment, substitution, r, ctx);
   }
-  return { env: environment2, sub: substitution };
+  return { env: environment2, sub: substitution, ctx };
 }

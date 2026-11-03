@@ -9,7 +9,7 @@ export enum TokenType {
   NOT, AND, OR,
   COMMA, SEMICOLON, COLON, DOT, ARROW,
   NUMBER_LITERAL, STRING_LITERAL, BOOLEAN_LITERAL, NULL_LITERAL,
-  IDENTIFIER, ASYNC, FUNCTION, LET, RETURN, AWAIT,
+  IDENTIFIER, ASYNC, FUNCTION, LET, TYPE, RETURN, AWAIT,
   EXPORT, CLASS, EXTENDS, PUBLIC, PROTECTED, PRIVATE,
   IF, ELSE, FOR, WHILE, DO, BREAK, CONTINUE,
   EOF,
@@ -63,6 +63,7 @@ lexerGenerator.addRule("identifier", "(${__letter}|$_)(${__letter}|${__decimal_d
 lexerGenerator.addRule("async", "async", TokenType.ASYNC);
 lexerGenerator.addRule("function", "function", TokenType.FUNCTION);
 lexerGenerator.addRule("let", "let", TokenType.LET);
+lexerGenerator.addRule("type", "type", TokenType.TYPE);
 lexerGenerator.addRule("return", "return", TokenType.RETURN);
 lexerGenerator.addRule("await", "await", TokenType.AWAIT);
 lexerGenerator.addRule("export", "export", TokenType.EXPORT);

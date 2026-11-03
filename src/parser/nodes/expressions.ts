@@ -21,11 +21,10 @@ import {
   check_unify,
   create_binding,
   create_type,
-  get_fresh_counter_value,
-  fresh_var,
   generalize,
   instantiate_binding,
   object_property_type,
+  TypecheckContext,
   TypeCheckError,
   TypeEnvironment,
 } from "../../typechecker";
@@ -38,8 +37,8 @@ export abstract class ExpressionNode extends BaseNode {
   abstract eval(thread: Thread, frame: CallFrame, interpreter: Interpreter, k: (value: Value) => void): void;
   /** `e_all` (defaulting to `e`) is the registered environment a nested
    *  function body is checked against; value expressions only see `e`. */
-  abstract infer(e: TypeEnvironment, sub: Substitution, e_all?: TypeEnvironment): Term;
-  abstract check(type: Term, e: TypeEnvironment, sub: Substitution, e_all?: TypeEnvironment): void;
+  abstract infer(e: TypeEnvironment, sub: Substitution, ctx: TypecheckContext, e_all?: TypeEnvironment): Term;
+  abstract check(type: Term, e: TypeEnvironment, sub: Substitution, ctx: TypecheckContext, e_all?: TypeEnvironment): void;
 }
 
 export class UnaryExpressionNode extends ExpressionNode {
@@ -76,25 +75,25 @@ export class UnaryExpressionNode extends ExpressionNode {
     } else throw new Error(`Unsupported unary operator token: ${TokenType[this.op.type]}`);
   }
 
-  infer(e: TypeEnvironment, sub: Substitution, e_all?: TypeEnvironment): Term {
+  infer(e: TypeEnvironment, sub: Substitution, ctx: TypecheckContext, e_all?: TypeEnvironment): Term {
     if (this.op.type === TokenType.MINUS) {
-      const operand = this.operand.infer(e, sub, e_all);
+      const operand = this.operand.infer(e, sub, ctx, e_all);
       check_unify(operand, create_type("int"), sub, `Unary "-" requires an int operand`);
       return create_type("int");
     }
 
     if (this.op.type === TokenType.NOT) {
-      this.operand.infer(e, sub, e_all);
+      this.operand.infer(e, sub, ctx, e_all);
       return create_type("bool");
     }
 
     if (this.op.type === TokenType.AWAIT) {
-      const operand = this.operand.infer(e, sub, e_all);
+      const operand = this.operand.infer(e, sub, ctx, e_all);
       // a promise unwraps to its inner type; anything else passes through
       // with its own type, mirroring the runtime
       const m = sub.mark();
 
-      const inner = fresh_var();
+      const inner = ctx.fresh.next();
       if (unify_write(operand, create_type("promise", [inner]), sub)) return resolve(inner, sub.map);
       sub.unmark(m);
 
@@ -104,8 +103,8 @@ export class UnaryExpressionNode extends ExpressionNode {
     throw new TypeCheckError(`Unsupported unary operator token: ${TokenType[this.op.type]}`, this.op);
   }
 
-  check(type: Term, e: TypeEnvironment, sub: Substitution, e_all?: TypeEnvironment): void {
-    check_unify(this.infer(e, sub, e_all), type, sub);
+  check(type: Term, e: TypeEnvironment, sub: Substitution, ctx: TypecheckContext, e_all?: TypeEnvironment): void {
+    check_unify(this.infer(e, sub, ctx, e_all), type, sub);
   }
 }
 
@@ -181,23 +180,23 @@ export class BinaryExpressionNode extends ExpressionNode {
     }
   }
 
-  infer(e: TypeEnvironment, sub: Substitution, e_all?: TypeEnvironment): Term {
+  infer(e: TypeEnvironment, sub: Substitution, ctx: TypecheckContext, e_all?: TypeEnvironment): Term {
     const op = this.op.type;
 
     if (op === TokenType.AND || op === TokenType.OR) {
       // the short-circuit operators return one of their operands, so both
       // sides must share a type
 
-      const left = this.left.infer(e, sub, e_all);
-      const right = this.right.infer(e, sub, e_all);
+      const left = this.left.infer(e, sub, ctx, e_all);
+      const right = this.right.infer(e, sub, ctx, e_all);
 
       check_unify(right, left, sub, `"${this.op.lexeme}" operands must have the same type`);
       return resolve(left, sub.map);
     }
 
     if (op === TokenType.PLUS) {
-      const left = this.left.infer(e, sub, e_all);
-      const right = this.right.infer(e, sub, e_all);
+      const left = this.left.infer(e, sub, ctx, e_all);
+      const right = this.right.infer(e, sub, ctx, e_all);
 
       // overloaded: int + int or str + str, decided by backtracking
       const m = sub.mark();
@@ -213,8 +212,8 @@ export class BinaryExpressionNode extends ExpressionNode {
       throw new TypeCheckError(`Unsupported operands for "+"`, this.op);
     }
 
-    const left = this.left.infer(e, sub, e_all);
-    const right = this.right.infer(e, sub, e_all);
+    const left = this.left.infer(e, sub, ctx, e_all);
+    const right = this.right.infer(e, sub, ctx, e_all);
 
     if (op === TokenType.MINUS || op === TokenType.MULTIPLY || op === TokenType.DIVIDE) {
       check_unify(left, create_type("int"), sub, `Left operand of "${this.op.lexeme}"`);
@@ -241,15 +240,15 @@ export class BinaryExpressionNode extends ExpressionNode {
     throw new TypeCheckError(`Unsupported operator token: ${TokenType[op]}`, this.op);
   }
 
-  check(type: Term, e: TypeEnvironment, sub: Substitution, e_all?: TypeEnvironment): void {
+  check(type: Term, e: TypeEnvironment, sub: Substitution, ctx: TypecheckContext, e_all?: TypeEnvironment): void {
     if (this.op.type === TokenType.AND || this.op.type === TokenType.OR) {
       // both sides must match the expected type directly
-      this.left.check(type, e, sub, e_all);
-      this.right.check(type, e, sub, e_all);
+      this.left.check(type, e, sub, ctx, e_all);
+      this.right.check(type, e, sub, ctx, e_all);
       return;
     }
 
-    check_unify(this.infer(e, sub, e_all), type, sub);
+    check_unify(this.infer(e, sub, ctx, e_all), type, sub);
   }
 }
 
@@ -267,7 +266,7 @@ export class LiteralExpressionNode extends ExpressionNode {
     else throw new Error(`Unexpected literal token: ${TokenType[token.type]}`);
   }
 
-  infer(e: TypeEnvironment, sub: Substitution, e_all?: TypeEnvironment): Term {
+  infer(e: TypeEnvironment, sub: Substitution, ctx: TypecheckContext, e_all?: TypeEnvironment): Term {
     void e_all;
     const t = this.value.type;
     if (t === TokenType.NUMBER_LITERAL) return create_type("int");
@@ -277,8 +276,8 @@ export class LiteralExpressionNode extends ExpressionNode {
     throw new TypeCheckError(`Unexpected literal token: ${TokenType[t]}`, this.value);
   }
 
-  check(type: Term, e: TypeEnvironment, sub: Substitution, e_all?: TypeEnvironment): void {
-    check_unify(this.infer(e, sub, e_all), type, sub, `Literal "${this.value.lexeme}"`);
+  check(type: Term, e: TypeEnvironment, sub: Substitution, ctx: TypecheckContext, e_all?: TypeEnvironment): void {
+    check_unify(this.infer(e, sub, ctx, e_all), type, sub, `Literal "${this.value.lexeme}"`);
   }
 }
 
@@ -291,16 +290,16 @@ export class IdentifierExpressionNode extends ExpressionNode {
     k(frame.environment.get(this.identifier.lexeme));
   }
 
-  infer(e: TypeEnvironment, sub: Substitution, e_all?: TypeEnvironment): Term {
+  infer(e: TypeEnvironment, sub: Substitution, ctx: TypecheckContext, e_all?: TypeEnvironment): Term {
     void e_all;
     const name = this.identifier.lexeme;
     const binding = e.get(name);
     if (binding === undefined) throw new TypeCheckError(`Undefined variable "${name}"`, this.identifier);
-    return instantiate_binding(binding, sub);
+    return instantiate_binding(binding, sub, ctx);
   }
 
-  check(type: Term, e: TypeEnvironment, sub: Substitution, e_all?: TypeEnvironment): void {
-    check_unify(this.infer(e, sub, e_all), type, sub, `Variable "${this.identifier.lexeme}"`);
+  check(type: Term, e: TypeEnvironment, sub: Substitution, ctx: TypecheckContext, e_all?: TypeEnvironment): void {
+    check_unify(this.infer(e, sub, ctx, e_all), type, sub, `Variable "${this.identifier.lexeme}"`);
   }
 }
 
@@ -313,12 +312,12 @@ export class GroupingExpressionNode extends ExpressionNode {
     this.expr.eval(thread, frame, interpreter, k);
   }
 
-  infer(e: TypeEnvironment, sub: Substitution, e_all?: TypeEnvironment): Term {
-    return this.expr.infer(e, sub, e_all);
+  infer(e: TypeEnvironment, sub: Substitution, ctx: TypecheckContext, e_all?: TypeEnvironment): Term {
+    return this.expr.infer(e, sub, ctx, e_all);
   }
 
-  check(type: Term, e: TypeEnvironment, sub: Substitution, e_all?: TypeEnvironment): void {
-    this.expr.check(type, e, sub, e_all);
+  check(type: Term, e: TypeEnvironment, sub: Substitution, ctx: TypecheckContext, e_all?: TypeEnvironment): void {
+    this.expr.check(type, e, sub, ctx, e_all);
   }
 }
 
@@ -357,11 +356,11 @@ export class ArrayAccessExpressionNode extends ExpressionNode {
     });
   }
 
-  infer(e: TypeEnvironment, sub: Substitution, e_all?: TypeEnvironment): Term {
-    const container = this.expr.infer(e, sub, e_all);
-    const index = this.index.infer(e, sub, e_all);
+  infer(e: TypeEnvironment, sub: Substitution, ctx: TypecheckContext, e_all?: TypeEnvironment): Term {
+    const container = this.expr.infer(e, sub, ctx, e_all);
+    const index = this.index.infer(e, sub, ctx, e_all);
 
-    const elem = fresh_var();
+    const elem = ctx.fresh.next();
     if (unify_write(container, create_type("array", [elem]), sub)) {
       check_unify(index, create_type("int"), sub, "Array index");
       return resolve(elem, sub.map);
@@ -369,12 +368,12 @@ export class ArrayAccessExpressionNode extends ExpressionNode {
 
     // obj[key]: the accessed property is unknown, so the result stays unconstrained
     const resolved = resolve(container, sub.map);
-    if (resolved.kind === "compound" && resolved.functor === "obj") return fresh_var();
+    if (resolved.kind === "compound" && resolved.functor === "obj") return ctx.fresh.next();
     throw new TypeCheckError(`Value of type ${show_type(resolved)} is not indexable`);
   }
 
-  check(type: Term, e: TypeEnvironment, sub: Substitution, e_all?: TypeEnvironment): void {
-    check_unify(this.infer(e, sub, e_all), type, sub);
+  check(type: Term, e: TypeEnvironment, sub: Substitution, ctx: TypecheckContext, e_all?: TypeEnvironment): void {
+    check_unify(this.infer(e, sub, ctx, e_all), type, sub);
   }
 }
 
@@ -393,8 +392,8 @@ export class DotAccessExpressionNode extends ExpressionNode {
     });
   }
 
-  infer(e: TypeEnvironment, sub: Substitution, e_all?: TypeEnvironment): Term {
-    const resolved = resolve(this.expr.infer(e, sub, e_all), sub.map);
+  infer(e: TypeEnvironment, sub: Substitution, ctx: TypecheckContext, e_all?: TypeEnvironment): Term {
+    const resolved = resolve(this.expr.infer(e, sub, ctx, e_all), sub.map);
     if (resolved.kind === "var")
       throw new TypeCheckError(`Cannot access property "${this.key.lexeme}" on a value of unknown type`, this.key);
 
@@ -405,8 +404,8 @@ export class DotAccessExpressionNode extends ExpressionNode {
     return resolve(prop, sub.map);
   }
 
-  check(type: Term, e: TypeEnvironment, sub: Substitution, e_all?: TypeEnvironment): void {
-    check_unify(this.infer(e, sub, e_all), type, sub);
+  check(type: Term, e: TypeEnvironment, sub: Substitution, ctx: TypecheckContext, e_all?: TypeEnvironment): void {
+    check_unify(this.infer(e, sub, ctx, e_all), type, sub);
   }
 }
 
@@ -469,7 +468,7 @@ export class AssignmentExpressionNode extends ExpressionNode {
     throw new Error(`Invalid assignment target`);
   }
 
-  infer(e: TypeEnvironment, sub: Substitution, e_all?: TypeEnvironment): Term {
+  infer(e: TypeEnvironment, sub: Substitution, ctx: TypecheckContext, e_all?: TypeEnvironment): Term {
     if (this.target instanceof IdentifierExpressionNode) {
       const name = this.target.identifier.lexeme;
       const binding = e.get(name);
@@ -488,18 +487,18 @@ export class AssignmentExpressionNode extends ExpressionNode {
       // constraints that earlier function bodies added, and unifying through
       // it keeps those constraints connected to the new value.
       const declared =
-        binding.placeholder !== undefined ? variable(binding.placeholder) : instantiate_binding(binding, sub);
-      const before = get_fresh_counter_value();
+        binding.placeholder !== undefined ? variable(binding.placeholder) : instantiate_binding(binding, sub, ctx);
+      const before = ctx.fresh.value();
 
-      const value_expr_type = this.value.infer(e, sub, e_all);
+      const value_expr_type = this.value.infer(e, sub, ctx, e_all);
       check_unify(value_expr_type, declared, sub, `Assignment to "${name}"`);
-      binding.poly = generalize(value_expr_type, e_all ?? e, sub, before, binding.placeholder);
+      binding.poly = generalize(value_expr_type, e_all ?? e, sub, before, ctx, binding.placeholder);
       return resolve(value_expr_type, sub.map);
     }
 
     if (this.target instanceof DotAccessExpressionNode) {
       const key = this.target.key.lexeme;
-      const resolved = resolve(this.target.expr.infer(e, sub, e_all), sub.map);
+      const resolved = resolve(this.target.expr.infer(e, sub, ctx, e_all), sub.map);
       const property_type = object_property_type(resolved, key);
 
       if (property_type === null)
@@ -508,23 +507,23 @@ export class AssignmentExpressionNode extends ExpressionNode {
           this.target.key,
         );
 
-      const value = this.value.infer(e, sub, e_all);
+      const value = this.value.infer(e, sub, ctx, e_all);
       check_unify(value, property_type, sub, `Assignment to "${key}"`);
       return resolve(property_type, sub.map);
     }
 
     if (this.target instanceof ArrayAccessExpressionNode) {
-      const container = this.target.expr.infer(e, sub, e_all);
-      const array_element_type = fresh_var();
+      const container = this.target.expr.infer(e, sub, ctx, e_all);
+      const array_element_type = ctx.fresh.next();
       if (!unify_write(container, create_type("array", [array_element_type]), sub)) {
         const resolved = resolve(container, sub.map);
         throw new TypeCheckError(`Value of type ${show_type(resolved)} is not assignable`);
       }
 
-      const index = this.target.index.infer(e, sub, e_all);
+      const index = this.target.index.infer(e, sub, ctx, e_all);
       check_unify(index, create_type("int"), sub, "Array index");
 
-      const value = this.value.infer(e, sub, e_all);
+      const value = this.value.infer(e, sub, ctx, e_all);
       check_unify(value, array_element_type, sub, "Array assignment");
       return resolve(array_element_type, sub.map);
     }
@@ -532,8 +531,8 @@ export class AssignmentExpressionNode extends ExpressionNode {
     throw new TypeCheckError("Invalid assignment target");
   }
 
-  check(type: Term, e: TypeEnvironment, sub: Substitution, e_all?: TypeEnvironment): void {
-    check_unify(this.infer(e, sub, e_all), type, sub);
+  check(type: Term, e: TypeEnvironment, sub: Substitution, ctx: TypecheckContext, e_all?: TypeEnvironment): void {
+    check_unify(this.infer(e, sub, ctx, e_all), type, sub);
   }
 }
 
@@ -568,13 +567,13 @@ export class ObjectLiteralExpressionNode extends ExpressionNode {
     eval_next(0);
   }
 
-  infer(e: TypeEnvironment, sub: Substitution, e_all?: TypeEnvironment): Term {
+  infer(e: TypeEnvironment, sub: Substitution, ctx: TypecheckContext, e_all?: TypeEnvironment): Term {
     const entries: [string, Term][] = [];
     const positions = new Map<string, number>();
 
     for (const prop of this.properties.get_items()) {
       const key = prop.key.lexeme;
-      const type = prop.value.infer(e, sub, e_all);
+      const type = prop.value.infer(e, sub, ctx, e_all);
       const existing = positions.get(key);
 
       // duplicate keys: last wins, mirroring the runtime's ObjectValue
@@ -592,8 +591,8 @@ export class ObjectLiteralExpressionNode extends ExpressionNode {
     );
   }
 
-  check(type: Term, e: TypeEnvironment, sub: Substitution, e_all?: TypeEnvironment): void {
-    check_unify(this.infer(e, sub, e_all), type, sub, "Object literal");
+  check(type: Term, e: TypeEnvironment, sub: Substitution, ctx: TypecheckContext, e_all?: TypeEnvironment): void {
+    check_unify(this.infer(e, sub, ctx, e_all), type, sub, "Object literal");
   }
 }
 
@@ -620,14 +619,14 @@ export class ArrayLiteralExpressionNode extends ExpressionNode {
     eval_next(0);
   }
 
-  infer(e: TypeEnvironment, sub: Substitution, e_all?: TypeEnvironment): Term {
-    const elem = fresh_var();
-    for (const item of this.items.get_items()) check_unify(item.infer(e, sub, e_all), elem, sub, "Array element");
+  infer(e: TypeEnvironment, sub: Substitution, ctx: TypecheckContext, e_all?: TypeEnvironment): Term {
+    const elem = ctx.fresh.next();
+    for (const item of this.items.get_items()) check_unify(item.infer(e, sub, ctx, e_all), elem, sub, "Array element");
     return create_type("array", [resolve(elem, sub.map)]);
   }
 
-  check(type: Term, e: TypeEnvironment, sub: Substitution, e_all?: TypeEnvironment): void {
-    check_unify(this.infer(e, sub, e_all), type, sub, "Array literal");
+  check(type: Term, e: TypeEnvironment, sub: Substitution, ctx: TypecheckContext, e_all?: TypeEnvironment): void {
+    check_unify(this.infer(e, sub, ctx, e_all), type, sub, "Array literal");
   }
 }
 
@@ -657,12 +656,12 @@ export class FunctionExpressionNode extends ExpressionNode {
     k(fn);
   }
 
-  infer(e: TypeEnvironment, sub: Substitution, e_all?: TypeEnvironment): Term {
+  infer(e: TypeEnvironment, sub: Substitution, ctx: TypecheckContext, e_all?: TypeEnvironment): Term {
     const params = this.params_list.get_items();
     // annotated parameters and return types are fixed by the annotation;
     // unannotated parts still get fresh variables for inference/generalization
-    const parameter_types = params.map((p) => (p.type === null ? fresh_var() : p.type.lower()));
-    const return_type = this.return_type === null ? fresh_var() : this.return_type.lower();
+    const parameter_types = params.map((p) => (p.type === null ? ctx.fresh.next() : p.type.lower(ctx)));
+    const return_type = this.return_type === null ? ctx.fresh.next() : this.return_type.lower(ctx);
 
     // the body runs later, at call time, so it sees the registered
     // environment (all declarations in scope, unprocessed ones as
@@ -671,7 +670,7 @@ export class FunctionExpressionNode extends ExpressionNode {
     params.forEach((p, i) => {
       body_env.set(p.name.lexeme, create_binding({ vars: [], type: parameter_types[i] }, true));
     });
-    this.body.typecheck(body_env, body_env, sub, return_type);
+    this.body.typecheck(body_env, body_env, sub, return_type, ctx);
 
     // a body without any return statement resolves to null at runtime. With no
     // annotation the return variable is still unconstrained, so bind it; with an
@@ -687,8 +686,8 @@ export class FunctionExpressionNode extends ExpressionNode {
     return create_type("f", [...parameter_types, ret_type]);
   }
 
-  check(type: Term, e: TypeEnvironment, sub: Substitution, e_all?: TypeEnvironment): void {
-    check_unify(this.infer(e, sub, e_all), type, sub);
+  check(type: Term, e: TypeEnvironment, sub: Substitution, ctx: TypecheckContext, e_all?: TypeEnvironment): void {
+    check_unify(this.infer(e, sub, ctx, e_all), type, sub);
   }
 }
 
@@ -727,7 +726,7 @@ export class FunctionCallExpressionNode extends ExpressionNode {
     });
   }
 
-  infer(e: TypeEnvironment, sub: Substitution, e_all?: TypeEnvironment): Term {
+  infer(e: TypeEnvironment, sub: Substitution, ctx: TypecheckContext, e_all?: TypeEnvironment): Term {
     const arg_nodes = this.args_list.get_items();
 
     // named builtins use their full (possibly variadic) signature, unless
@@ -738,14 +737,14 @@ export class FunctionCallExpressionNode extends ExpressionNode {
       const binding = e.get(name);
 
       if (sig !== undefined && (binding === undefined || binding.builtin)) {
-        const arg_types = arg_nodes.map((arg) => arg.infer(e, sub, e_all));
+        const arg_types = arg_nodes.map((arg) => arg.infer(e, sub, ctx, e_all));
         check_intrinsic_call(name, sig, arg_types, sub, this.left.identifier);
         return resolve(sig.return, sub.map);
       }
     }
 
-    const callee_type = this.left.infer(e, sub, e_all);
-    const argument_types = arg_nodes.map((arg) => arg.infer(e, sub, e_all));
+    const callee_type = this.left.infer(e, sub, ctx, e_all);
+    const argument_types = arg_nodes.map((arg) => arg.infer(e, sub, ctx, e_all));
     const resolved_callee = resolve(callee_type, sub.map);
     const callee_token = this.left instanceof IdentifierExpressionNode ? this.left.identifier : undefined;
 
@@ -765,8 +764,8 @@ export class FunctionCallExpressionNode extends ExpressionNode {
 
     if (resolved_callee.kind === "var") {
       // commit the callee to a function type matching this call's arity
-      const ret = fresh_var();
-      const param_types = argument_types.map(() => fresh_var());
+      const ret = ctx.fresh.next();
+      const param_types = argument_types.map(() => ctx.fresh.next());
       const fn_type = create_type("f", [...param_types, ret]);
 
       if (!unify_write(callee_type, fn_type, sub))
@@ -784,7 +783,7 @@ export class FunctionCallExpressionNode extends ExpressionNode {
     throw new TypeCheckError(`Value of type ${show_type(resolved_callee)} is not callable`, callee_token);
   }
 
-  check(type: Term, e: TypeEnvironment, sub: Substitution, e_all?: TypeEnvironment): void {
-    check_unify(this.infer(e, sub, e_all), type, sub);
+  check(type: Term, e: TypeEnvironment, sub: Substitution, ctx: TypecheckContext, e_all?: TypeEnvironment): void {
+    check_unify(this.infer(e, sub, ctx, e_all), type, sub);
   }
 }

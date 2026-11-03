@@ -14,6 +14,7 @@ import {
   IfStatementNode,
   ReturnStatementNode,
   StatementNode,
+  TypeDeclarationNode,
   VariableDeclarationNode,
   WhileStatementNode,
 } from "./parser/nodes/statements";
@@ -79,6 +80,7 @@ const reducers = {
   // for-loop initializer: same shape as var_decl but without the trailing semicolon
   for_var_decl: (bag: { variable_name: Token; type?: TypeExpressionNode; value: ExpressionNode }) =>
     new VariableDeclarationNode(bag.variable_name, bag.type ?? null, bag.value),
+  type_decl: (bag: { name: Token; type: TypeExpressionNode }) => new TypeDeclarationNode(bag.name, bag.type),
   return_stmt: (bag: { expr?: ExpressionNode }) => new ReturnStatementNode(bag.expr ?? null),
   expr_stmt: (bag: { expr: ExpressionNode }) => new ExpressionStatementNode(bag.expr),
 
