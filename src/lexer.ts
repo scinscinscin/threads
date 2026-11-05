@@ -22,6 +22,9 @@ const lexerGenerator = new Slex<TokenType, Metadata>({
   isHigherPrecedence: ({ current, next }) => current === TokenType.IDENTIFIER,
 });
 
+lexerGenerator.addCharacterClass("__symbol_no_quote", (ch) =>
+  ch == `"` ? false : /^\p{P}+$/u.test(ch) || /^\p{S}+$/u.test(ch),
+);
 lexerGenerator.addRule("lparen", "$(", TokenType.L_PAREN);
 lexerGenerator.addRule("rparen", "$)", TokenType.R_PAREN);
 lexerGenerator.addRule("lbrace", "${", TokenType.L_BRACE);
@@ -51,7 +54,7 @@ lexerGenerator.addRule("dot", "$.", TokenType.DOT);
 lexerGenerator.addRule("arrow", "$=$>", TokenType.ARROW);
 
 lexerGenerator.addRule("number_literal", "(${__decimal_digit})+", TokenType.NUMBER_LITERAL);
-lexerGenerator.addRule("character", "${__letter} | ${__decimal_digit} | ${__symbols} | $ ");
+lexerGenerator.addRule("character", "${__letter} | ${__decimal_digit} | ${__symbol_no_quote} | $ ");
 lexerGenerator.addRule("string_literal", '$"(${character} | $\')*$"', TokenType.STRING_LITERAL, (str) =>
   str.substring(1, str.length - 1).replaceAll("\\n", "\n"),
 );

@@ -34,7 +34,7 @@ export class Substitution {
     this.map.set(name, term);
   }
 
-  /** A read-only copy of the current bindings. */
+  /** A snapshot copy of the current bindings (a plain `Map` copy). */
   fork(): Subst {
     return new Map(this.map);
   }
@@ -55,7 +55,7 @@ export function resolve(t: Term, env: Subst): Term {
   return cur;
 }
 
-// Returns true if variable v is used inisde term t
+// Returns true if variable v is used inside term t
 function occurs_check(v: Var, t: Term, sub: Substitution): boolean {
   const cur = resolve(t, sub.map);
   if (cur.kind === "atom") return false;

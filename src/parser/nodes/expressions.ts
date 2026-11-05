@@ -18,11 +18,13 @@ import { BaseNode, ListNode } from "./base";
 import { body_has_return, is_void } from "./statements";
 import type { BlockStatementNode } from "./statements";
 import {
+  check_intrinsic_call,
   check_unify,
   create_binding,
   create_type,
   generalize,
   instantiate_binding,
+  intrinsics,
   object_property_type,
   TypecheckContext,
   TypeCheckError,
@@ -31,7 +33,6 @@ import {
 import { TypeExpressionNode } from "./types";
 import { resolve, Substitution, unify_write } from "../../typechecker/unify";
 import { compound, show_type, Term, variable } from "../../typechecker/ast";
-import { check_intrinsic_call, intrinsics } from "../../typechecker/intrinsics";
 
 /** The state threaded through expression typechecking: `e` is the live
  *  environment (declarations already processed) that value expressions see;

@@ -149,8 +149,9 @@ export class Interpreter {
 
     runtime: while (this.threads.some((t) => t.status !== "finished")) {
       if (!this.tick()) {
-        // If there is a thread waiting on an internal promise, shut down the interpreter
-        // The interpreter will be awaken when it resolvees and the blocked thread is unblocked
+        // If a thread is waiting on an internal promise, break out so the host
+        // event loop can run; the interpreter resumes when the promise resolves
+        // and the blocked thread is unblocked
         const waiting = this.threads.filter((t) => t.status === "blocked_on_internal_promise");
         if (waiting.length > 0) break runtime;
 
@@ -165,7 +166,7 @@ export class Interpreter {
     this.interpreter_is_running = false;
   }
 
-  /** Advance every sleeping or runnable thread by one scheduling unit. */
+  /** Advance every runnable thread by one scheduling unit. */
   public tick(): boolean {
     let progressed = false;
 
@@ -191,8 +192,8 @@ export class Interpreter {
   }
 
   /**
-   * Execute the top frame's statements until the frame is done, the thread blocks
-   * (sleep) or suspends (await), or a `return` unwinds an enclosing frame.
+   * Execute the top frame's statements until the frame is done, the thread
+   * blocks on an await, or a `return` unwinds an enclosing frame.
    */
   public step_frame(thread: Thread): void {
     for (;;) {

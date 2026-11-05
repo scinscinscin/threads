@@ -5,7 +5,7 @@
 ## Commands
 
 - `yarn install`
-- `yarn example` / `yarn demo` - run `example_program.lol`
+- `yarn example` - run `example_program.lol`
 - `yarn start [file.lol] [--debug-types]` - run any `.lol` file (defaults to `example_program.lol`); `--debug-types` prints the type each top-level declaration committed to (to stderr)
 - `yarn typecheck` - `tsc --noEmit`
 - `yarn test` - vitest suite (`test/*.test.ts`): typechecker units (create_type, unify, generalize/instantiate) plus end-to-end parse+typecheck programs
@@ -19,24 +19,24 @@
 - `parser.ts` - sparse LR(1) parser + AST node classes + `reducers` map
 - `interpreter.ts` - `Environment`, `CallFrame`, `Thread`, `Interpreter` scheduler
 - `value.ts` - runtime values, `FunctionValue`/`PromiseValue`, builtins
-- `typechecker/` - static Hindley-Milner typechecker (inference + optional annotations, deferred function bodies): `index.ts` (type registry via `create_type`, per-pass `TypecheckContext` (a `FreshVarGenerator` + a block-scoped `AliasTable` for the annotation name table and user-defined type constructors), `Binding`/generalization, two-phase `typecheck()` driver), `ast.ts` (`Term` = atom/var/compound, `show_type`), `unify.ts` (trail substitution), `intrinsics.ts` (builtin signatures)
+- `typechecker/` - static Hindley-Milner typechecker (inference + optional annotations, deferred function bodies): `index.ts` (type registry via `create_type`, per-pass `TypecheckContext` (a `FreshVarGenerator` + a block-scoped `AliasTable` for the annotation name table and user-defined type constructors), `Binding`/generalization, two-phase `typecheck()` driver), `ast.ts` (`Term` = atom/var/compound, `show_type`), `unify.ts` (trail substitution); builtin signatures live in `index.ts` (`intrinsics` map + `check_intrinsic_call`)
 
 ## Runtime & concurrency
 
 There is no event loop and no JavaScript `Promise` - the interpreter is a manual `while` loop (`Interpreter.run()`) over a list of user-mode `Thread`s, and `PromiseValue` is a custom class. Everything below is driven by `tick()`.
 
-**Evaluation is continuation-passing (CPS).** Statements implement `eval(thread, frame, interpreter): StatementOutcome` (`{kind: "ok" | "return" | "suspended"}`); expressions implement `eval(thread, frame, interpreter, k)` and call `k(value)`. A node that may block returns `"suspended"` after putting the thread to sleep. Follow these exact signatures when adding a node.
+**Evaluation is continuation-passing (CPS).** Statements implement `eval(thread, frame, interpreter): StatementOutcome` (`{kind: "ok" | "return" | "suspended"}`); expressions implement `eval(thread, frame, interpreter, k)` and call `k(value)`. A node that may block returns `"suspended"` after parking the thread. Follow these exact signatures when adding a node.
 
 **Scheduling is "run until blocked," not round-robin.** Each `tick()` walks threads in creation order (`main`, `T1`, `T2`, ...):
-- A runnable thread runs until it hits `sleep` or an unresolved `await` (many statements per tick).
-- A sleeping thread only decrements its sleep counter; it wakes once its `sleep(n)` has fully counted down, and never runs in the tick it wakes.
+- A runnable thread runs until it `await`s an unresolved promise (many statements per tick).
 - A thread blocked on a promise does nothing and counts as no progress.
+- A thread awaiting a builtin's internal promise (status `blocked_on_internal_promise`, see below) also does nothing in `tick()`; `run()` is async and breaks out to the host event loop so the builtin's JS timer can fire.
 
-If a tick makes no progress, every remaining thread is promise-blocked and `run()` throws `Deadlock` listing their labels.
+If a tick makes no progress and no thread is waiting on an internal promise, `run()` throws `Deadlock` listing the blocked threads' labels.
 
-**Two distinct blocking mechanisms** (both set `status = "blocked"`):
-- `sleep(n)` sets `sleep_remaining = n` and is woken by tick decrementing. It is not a promise.
-- `await <unresolved promise>` sets `blocked_on`, stores the resume continuation in `pending`, and registers the thread in `promise.waiters`; it is woken when `PromiseValue.resolve()` flips the waiter back to `not_blocked`.
+**Two distinct blocking mechanisms** (statuses `blocked` and `blocked_on_internal_promise`):
+- `await <unresolved promise>` from user code sets `status = "blocked"`, `blocked_on`, stores the resume continuation in `pending`, and registers the thread in `promise.waiters`; it is woken when `PromiseValue.resolve()` flips the waiter back to `not_blocked`.
+- `await` on a builtin's internal promise sets `status = "blocked_on_internal_promise"`; currently only `resolve` (which waits a second on a real JS `setTimeout`) produces one. When the JS timer fires the builtin resolves the `PromiseValue`, and `Thread.unblock()` restarts `run()` if it had broken out.
 
 **Await edge cases:** `await <non-promise>` passes through unchanged; `await <resolved promise>` returns immediately without blocking; `await` in a sync function body is a runtime error (it is only legal in async contexts). The top-level program body is async, so top-level `await` works.
 
@@ -44,9 +44,9 @@ If a tick makes no progress, every remaining thread is promise-blocked and `run(
 
 **Frames & returns:** call frames chain via `parent`. `captures_return` is true for function/program bodies and false for blocks, so `return` unwinds through blocks to the enclosing function body. `on_frame_done(value)` is the frame-completion callback (the call continuation for sync, `complete_thread` for async, `null` for blocks).
 
-**Scoping:** environments chain via `parent`. A function call forks the *definition-site* environment (closures) and binds parameters in the fork; a block forks the current environment (block scope). Function declarations register the function when the declaration statement executes - there is no hoisting, so declare before use. The global environment provides `print` and `sleep`.
+**Scoping:** environments chain via `parent`. A function call forks the *definition-site* environment (closures) and binds parameters in the fork; a block forks the current environment (block scope). Function declarations register the function when the declaration statement executes - there is no hoisting, so declare before use. The global environment provides `print` and `resolve`.
 
-**Language surface:** builtins are only `print` and `sleep`; the only operator is `+` (number/string); numbers are integers only; strings are double-quoted (single quotes allowed inside, `\n` unescaped).
+**Language surface:** builtins are only `print` and `resolve` (async demo: waits a second on a JS timer, resolves with `3`); operators are arithmetic `+ - * /` (integers; `+` also concatenates strings), equality `== !=` (any values), comparison `< > <= >=` (integers), short-circuiting `&& ||`, and unary `- ! await`; numbers are integers only; strings are double-quoted (single quotes allowed inside, `\n` unescaped).
 
 **Type annotations (optional):** `let x: T = expr;`, for-loop initializers, `function(p: T): R { ... }`. A type expression is an identifier (`int`, `bool`, `void`, `str`, `null`, `any`), `Name<Inner>` (only `promise`/`Promise`), `T[]` (repeatable), `(T, ..., T) => R` (`=>` is type-syntax only; `function` definitions use `: R`), or an object type `{a: T; b: T}` (identifier or string-literal keys, `;`-delimited, at least one field, duplicate fields are a positioned type error). An async function's return annotation is the *inner* type (auto promise-wrapped), so `Promise<T>` in an async annotation means promise-of-promise. Annotations are parsed into a tree of `TypeExpressionNode` subclasses (`TypeConcreteNode`, `TypeParametricNode`, `TypeArrayNode`, `TypeFunctionNode`, `TypeObjectNode`), each of which lowers itself to a `Term` via its `lower()` method at typecheck time (unknown names are positioned `TypeCheckError`s). Object types lower to the same `obj(key(T), ...)` encoding as object literals; `unify_write` matches `obj` terms by property name (order-insensitive, exact key set), mirroring the runtime `ObjectValue`. Annotated declarations are checked and stay monomorphic; unannotated code infers and generalizes exactly as before. A body that falls off the end with a non-`void`/non-`null` return annotation is a type error. Type alias declarations: `type Name = <type expr>:` (trailing colon) binds `Name` to a type expression in the type namespace only; the statement is a runtime no-op (`TypeDeclarationNode.execute` returns ok without touching the environment). A declaration may carry a parameter list, `type Name<A, B> = <type expr using A and B>:`, making `Name` a *user-defined type constructor*: its body is lowered once at declaration with the parameters bound to fresh type variables (inside `AliasTable.lower_target`, under the same `computing` re-entry guard, so self- and mutual-reference are circular-definition errors), and each use `Name<T1, T2>` substitutes the argument types for those variables (`AliasTable.apply_user_constructor`). A bare use of the constructor name is a type error (`requires a type argument`), as is a bare constructor name as another alias's target (spell it applied); parameter names may not duplicate each other or a built-in type name, and constructors are block-scoped and shadowable like aliases. Aliases are block-scoped like lets: `BlockStatementNode.typecheck` pushes/pops an alias scope on the pass's `AliasTable`, and top-level aliases are pre-scanned in two passes (names first, then records) so bodies may reference an alias declared later, mirroring the let pre-scan. A target that is a bare parametric name (`type P = Promise:`) is a *parametric* alias used with its type argument (`P<int>`, spliced in `TypeParametricNode.lower`); every other target is a *complete* alias used bare. Name resolution is a single path: `AliasTable.resolve` checks the alias table first, then the built-in name table, and returns a `ResolvedType` (a complete `term`, a built-in parametric `registry`/`arity`, or a user constructor's `params`/`param_vars`/`body`), so alias handling is transparent to the `lower()` implementations. Pass state lives in a `TypecheckContext` instantiated at the root of `typecheck()` and threaded through `typecheck`/`infer`/`check`/`lower`/`generalize`/`instantiate_binding` as a single `ctx` parameter, so multiple passes run independently (no module-level mutable state; `typecheck` also returns the `ctx`). Aliases may chain; circular definitions (including through constructor bodies), duplicates within one scope (aliases and type parameters), and names shadowing built-in type names (aliases and parameters) are positioned type errors.
 

@@ -310,6 +310,43 @@ export function check_unify(actual: Term, expected: Term, sub: Substitution, mes
   }
 }
 
+/**
+ * The static signature of a builtin function. Parameters of type `any`
+ * accept an argument of any type; a variadic signature applies `params[0]`
+ * to every argument.
+ */
+export interface IntrinsicSignature {
+  params: Term[];
+  variadic: boolean;
+  return: Term;
+}
+
+export const intrinsics: Map<string, IntrinsicSignature> = new Map([
+  ["print", { params: [create_type("any")], variadic: true, return: create_type("bool") }],
+  ["resolve", { params: [create_type("any")], variadic: true, return: create_type("promise", [create_type("int")]) }],
+]);
+
+/** Check a call to a builtin against its signature, throwing on violation. */
+export function check_intrinsic_call(
+  name: string,
+  sig: IntrinsicSignature,
+  arg_types: Term[],
+  sub: Substitution,
+  token?: Token,
+): void {
+  if (sig.variadic === false && arg_types.length !== sig.params.length)
+    throw new TypeCheckError(
+      `Builtin ${name} expects ${sig.params.length} argument(s), got ${arg_types.length}`,
+      token,
+    );
+
+  for (let i = 0; i < arg_types.length; i++) {
+    const param = resolve(sig.variadic ? sig.params[0] : sig.params[i], sub.map);
+    if (param.kind === "atom" && param.name === "any") continue;
+    check_unify(arg_types[i], param, sub, `Argument ${i + 1} of ${name}`);
+  }
+}
+
 export type PolyType = { vars: string[]; type: Term };
 /** `builtin` marks the global `print`/`resolve` entries so call sites can tell
  *  them apart from user declarations that shadow the same name.
@@ -465,14 +502,19 @@ export function show_polytype(poly: PolyType, sub?: Substitution): string {
   return poly.vars.length === 0 ? body : `forall ${poly.vars.join(", ")}. ${body}`;
 }
 
-const globals = {
-  print: create_binding({ vars: [], type: create_type("f", [create_type("any"), create_type("bool")]) }, false, true),
-  resolve: create_binding(
-    { vars: [], type: create_type("f", [create_type("any"), create_type("promise", [create_type("int")])]) },
-    false,
-    true,
-  ),
-} as { [key: string]: Binding };
+/** The global bindings for the builtins, derived from the `intrinsics`
+ *  signatures so the two never drift apart: a variadic builtin's `f`-type is
+ *  `f(params[0], return)`. */
+const globals = Object.fromEntries(
+  [...intrinsics.entries()].map(([name, sig]) => [
+    name,
+    create_binding(
+      { vars: [], type: create_type("f", [...(sig.variadic ? [sig.params[0]] : sig.params), sig.return]) },
+      false,
+      true,
+    ),
+  ]),
+) as { [key: string]: Binding };
 
 /** Typecheck a program; returns the final top-level environment (every declaration
  *  with its committed polytype), the accumulated substitution, and the pass's
@@ -523,9 +565,8 @@ export function typecheck(program: ProgramNode): { env: TypeEnvironment; sub: Su
   }
 
   let environment2 = environment;
-  for (const stmt of program.statements.get_items()) {
-    const r = create_type("void");
+  const r = create_type("void");
+  for (const stmt of program.statements.get_items()) 
     environment2 = stmt.typecheck({ e: environment2, e_all: all_environment, sub: substitution, r, ctx });
-  }
   return { env: environment2, sub: substitution, ctx };
 }
