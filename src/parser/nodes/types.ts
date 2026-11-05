@@ -25,10 +25,10 @@ export class TypeConcreteNode extends TypeExpressionNode {
 
   lower(ctx: TypecheckContext): Term {
     // `AliasTable.resolve` resolves type aliases before built-in type names,
-    // so aliases are transparent here; a parametric name still needs its type
-    // argument at the use site.
+    // so aliases are transparent here; a parametric name -- built-in or
+    // user-defined -- still needs its type arguments at the use site.
     const resolved = ctx.aliases.resolve(this.name.lexeme, this.name);
-    if (resolved.kind === "parametric")
+    if (resolved.kind !== "complete")
       throw new TypeCheckError(`Type "${this.name.lexeme}" requires a type argument`, this.name);
 
     return resolved.term;
@@ -46,22 +46,24 @@ export class TypeParametricNode extends TypeExpressionNode {
 
   lower(ctx: TypecheckContext): Term {
     // `AliasTable.resolve` resolves type aliases before built-in type names,
-    // so a parametric alias splices its argument(s) into the aliased name and
-    // a complete alias takes no arguments, exactly as for built-ins.
+    // so a parametric alias splices its argument(s) into the aliased name, a
+    // user-defined type constructor substitutes them for its type parameters,
+    // and a complete alias takes no arguments -- exactly as for built-ins.
     const resolved = ctx.aliases.resolve(this.name.lexeme, this.name);
     if (resolved.kind === "complete")
       throw new TypeCheckError(`Type "${this.name.lexeme}" takes no type arguments`, this.name);
 
-    if (this.args.length !== resolved.arity)
+    const arity = resolved.kind === "parametric" ? resolved.arity : resolved.params.length;
+    if (this.args.length !== arity)
       throw new TypeCheckError(
-        `Type "${this.name.lexeme}" takes ${resolved.arity} type argument, got ${this.args.length}`,
+        `Type "${this.name.lexeme}" takes ${arity} type argument${arity === 1 ? "" : "s"}, got ${this.args.length}`,
         this.name,
       );
 
-    return create_type(
-      resolved.registry,
-      this.args.map((a) => a.lower(ctx)),
-    );
+    const arg_types = this.args.map((a) => a.lower(ctx));
+    return resolved.kind === "parametric"
+      ? create_type(resolved.registry, arg_types)
+      : ctx.aliases.apply_user_constructor(this.name.lexeme, arg_types);
   }
 }
 

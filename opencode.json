@@ -1,26 +1,12 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "policies": [
-    { "action": "provider.use", "resource": "*", "effect": "deny" },
-    { "action": "provider.use", "resource": "llama", "effect": "allow" },
-    { "action": "provider.use", "resource": "opencode", "effect": "allow" }
-  ],
+  "policies": [{ "action": "provider.use", "resource": "llama", "effect": "allow" }],
   "providers": {
     "llama": {
       "name": "llama.cpp",
       "package": "aisdk:@ai-sdk/openai-compatible",
       "settings": { "baseURL": "http://192.168.0.78:8080/v1" },
       "models": {
-        "Qwen3.8-27B": {
-          "modelID": "unsloth/Qwen3.8-27B-GGUF:UD-IQ4_XS",
-          "name": "unsloth/Qwen3.8-27B-GGUF:UD-IQ4_XS",
-          "limit": { "context": 81920, "output": 16384 }
-        },
-        "Qwen3.6-35B-A3B": {
-          "modelID": "unsloth/Qwen3.6-35B-A3B-MTP-GGUF:IQ4_XS",
-          "name": "unsloth/Qwen3.6-35B-A3B-MTP-GGUF:IQ4_XS",
-          "limit": { "context": 131072, "output": 16384 }
-        },
         "Qwen3.8-27B-ASCII-Condensed-UD-IQ4_XS": {
           "modelID": "bsaleh/Qwen3.8-27B-ASCII-Condensed:UD-IQ4_XS",
           "name": "bsaleh/Qwen3.8-27B-ASCII-Condensed:UD-IQ4_XS",

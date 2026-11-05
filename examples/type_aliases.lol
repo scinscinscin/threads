@@ -22,6 +22,21 @@ let f: Inc = function(x: Pos): Pos {
 
 print(f(5));
 
+type Pair<A, B> = { first: A; second: B }:
+let pair: Pair<int, str> = { first: 6, second: "pair" };
+print(pair.first);
+print(pair.second);
+
+type Wrap<A, B, C> = A[]:
+let wrapped: Wrap<int, bool, str> = [9];
+print(wrapped[0]);
+
+type Id<A> = (A) => A:
+let identity: Id<int> = function(x): int {
+  return x;
+};
+print(identity(2));
+
 {
   type Pos = str:
   let s: Pos = "shadowed";

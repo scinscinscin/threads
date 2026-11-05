@@ -80,7 +80,11 @@ const reducers = {
   // for-loop initializer: same shape as var_decl but without the trailing semicolon
   for_var_decl: (bag: { variable_name: Token; type?: TypeExpressionNode; value: ExpressionNode }) =>
     new VariableDeclarationNode(bag.variable_name, bag.type ?? null, bag.value),
-  type_decl: (bag: { name: Token; type: TypeExpressionNode }) => new TypeDeclarationNode(bag.name, bag.type),
+  type_decl: (bag: { name: Token; type_params?: ListNode<Token>; type: TypeExpressionNode }) =>
+    new TypeDeclarationNode(bag.name, bag.type_params ?? null, bag.type),
+  type_params: (bag: { params: ListNode<Token> }) => bag.params,
+  type_param_list: (bag: { param: Token; rest?: ListNode<Token> }) =>
+    new ListNode<Token>([bag.param, ...(bag.rest?.get_items() ?? [])]),
   return_stmt: (bag: { expr?: ExpressionNode }) => new ReturnStatementNode(bag.expr ?? null),
   expr_stmt: (bag: { expr: ExpressionNode }) => new ExpressionStatementNode(bag.expr),
 

@@ -23,21 +23,23 @@ type StatementOutcome =
   | { kind: "suspended" }
   | { kind: "end_frame" };
 
+/** The state threaded through statement typechecking: `e` is the live
+ *  environment (declarations already processed) that value expressions see;
+ *  `e_all` is the registered environment (every declaration in scope,
+ *  unprocessed ones as placeholders) that function bodies see; `sub` is the
+ *  pass's substitution, `r` the enclosing return type, and `ctx` the pass's
+ *  context. */
+export type TypecheckState = {
+  e: TypeEnvironment;
+  e_all: TypeEnvironment;
+  sub: Substitution;
+  r: Term;
+  ctx: TypecheckContext;
+};
+
 export abstract class StatementNode extends BaseNode {
   abstract execute(thread: Thread, frame: CallFrame, interpreter: Interpreter): StatementOutcome;
-  /**
-   * Typecheck the statement. `e` is the live environment (declarations already
-   * processed) that value expressions see; `e_all` is the registered
-   * environment (every declaration in scope, unprocessed ones as placeholders)
-   * that function bodies see.
-   */
-  abstract typecheck(
-    e: TypeEnvironment,
-    e_all: TypeEnvironment,
-    sub: Substitution,
-    r: Term,
-    ctx: TypecheckContext,
-  ): TypeEnvironment;
+  abstract typecheck(state: TypecheckState): TypeEnvironment;
 }
 
 export class BlockStatementNode extends StatementNode {
@@ -55,41 +57,22 @@ export class BlockStatementNode extends StatementNode {
     return thread.suspended_or_ok();
   }
 
-  typecheck(e: TypeEnvironment, e_all: TypeEnvironment, sub: Substitution, r: Term, ctx: TypecheckContext): TypeEnvironment {
+  typecheck({ e, e_all, sub, r, ctx }: TypecheckState): TypeEnvironment {
     let e2 = new Map(e);
     let e_all2 = new Map(e_all);
+
     // Type aliases are scoped per block just like value bindings: the block
     // gets its own alias scope, so aliases declared inside do not leak out.
     ctx.aliases.push_scope();
     try {
-      for (const st of this.statements.get_items()) e2 = st.typecheck(e2, e_all2, sub, r, ctx);
+      for (const st of this.statements.get_items()) e2 = st.typecheck({ e: e2, e_all: e_all2, sub, r, ctx });
     } finally {
       ctx.aliases.pop_scope();
     }
+
     return e;
   }
 }
-
-// export class FunctionDeclarationNode extends StatementNode {
-//   constructor(
-//     public readonly is_async: boolean,
-//     public readonly identifier: Token,
-//     public readonly params_list: ListNode<Token>,
-//     public readonly body: BlockStatementNode,
-//   ) {
-//     super();
-//   }
-
-//   execute(thread: Thread, frame: CallFrame): StatementOutcome {
-//     const name = this.identifier.lexeme;
-//     const params = this.params_list.get_items().map((t) => t.lexeme);
-//     const fn = new FunctionValue(name, frame.environment, this.is_async, params, this.body);
-//     frame.environment.add_key(name, fn);
-
-//     // atomic operation, no need to check if suspended
-//     return { kind: "ok" };
-//   }
-// }
 
 export class VariableDeclarationNode extends StatementNode {
   constructor(
@@ -115,7 +98,7 @@ export class VariableDeclarationNode extends StatementNode {
     return thread.suspended_or_ok();
   }
 
-  typecheck(e: TypeEnvironment, e_all: TypeEnvironment, sub: Substitution, r: Term, ctx: TypecheckContext): TypeEnvironment {
+  typecheck({ e, e_all, sub, ctx }: TypecheckState): TypeEnvironment {
     const name = this.variable_name.lexeme;
     const env2: TypeEnvironment = new Map(e);
 
@@ -125,7 +108,7 @@ export class VariableDeclarationNode extends StatementNode {
     if (this.type !== null) {
       const annotated_type = this.type.lower(ctx);
       if (this.value !== null)
-        check_unify(this.value.infer(e, sub, ctx, e_all), annotated_type, sub, `Initializer for "${name}"`);
+        check_unify(this.value.infer({ e, sub, ctx, e_all }), annotated_type, sub, `Initializer for "${name}"`);
 
       if (this.registered !== undefined) {
         this.registered.poly = { vars: [], type: annotated_type };
@@ -142,7 +125,7 @@ export class VariableDeclarationNode extends StatementNode {
     // `let x;` starts as null at runtime but accepts any later assignment,
     // so it is typed with an unconstrained variable the first assignment pins
     const before = ctx.fresh.value();
-    const variable_type = this.value == null ? ctx.fresh.next() : this.value.infer(e, sub, ctx, e_all);
+    const variable_type = this.value == null ? ctx.fresh.next() : this.value.infer({ e, sub, ctx, e_all });
 
     // a pre-registered declaration carries a placeholder variable: commit the
     // inferred type to it so function bodies already checked against this
@@ -163,12 +146,15 @@ export class VariableDeclarationNode extends StatementNode {
   }
 }
 
-/** A type alias declaration: `type Name = <type expr>:`. Purely static -- a
- *  runtime no-op that registers `Name` in the enclosing alias scope, where it
- *  resolves to the target type expression at every type position. */
+/** A type alias declaration: `type Name = <type expr>:`, or a user-defined
+ *  type constructor declaration: `type Name<A, B> = <type expr using A and
+ *  B>:`. Purely static -- a runtime no-op that registers `Name` in the
+ *  enclosing alias scope, where it resolves to the target type expression at
+ *  every type position. */
 export class TypeDeclarationNode extends StatementNode {
   constructor(
     public readonly name: Token,
+    public readonly params: ListNode<Token> | null,
     public readonly type: TypeExpressionNode,
   ) {
     super();
@@ -183,15 +169,9 @@ export class TypeDeclarationNode extends StatementNode {
     return { kind: "ok" };
   }
 
-  typecheck(
-    e: TypeEnvironment,
-    _e_all: TypeEnvironment,
-    _sub: Substitution,
-    _r: Term,
-    ctx: TypecheckContext,
-  ): TypeEnvironment {
+  typecheck({ e, ctx }: TypecheckState): TypeEnvironment {
     if (this.registered === undefined) {
-      ctx.aliases.declare(this.name, this.type);
+      ctx.aliases.declare(this.name, this.params?.get_items() ?? null, this.type);
       this.registered = ctx.aliases.record(this.name.lexeme);
     }
 
@@ -217,8 +197,8 @@ export class ReturnStatementNode extends StatementNode {
     return thread.suspended_or_ok();
   }
 
-  typecheck(e: TypeEnvironment, e_all: TypeEnvironment, sub: Substitution, r: Term, ctx: TypecheckContext): TypeEnvironment {
-    if (this.expr) this.expr.check(r, e, sub, ctx, e_all);
+  typecheck({ e, e_all, sub, r, ctx }: TypecheckState): TypeEnvironment {
+    if (this.expr) this.expr.check(r, { e, sub, ctx, e_all });
     else if (!is_void(r, sub))
       throw new Error(`missing return value: function returns ${show_type(resolve(r, sub.map))}`);
     return e;
@@ -235,8 +215,8 @@ export class ExpressionStatementNode extends StatementNode {
     return thread.suspended_or_ok();
   }
 
-  typecheck(e: TypeEnvironment, e_all: TypeEnvironment, sub: Substitution, r: Term, ctx: TypecheckContext): TypeEnvironment {
-    this.expr.infer(e, sub, ctx, e_all);
+  typecheck({ e, e_all, sub, ctx }: TypecheckState): TypeEnvironment {
+    this.expr.infer({ e, sub, ctx, e_all });
     return e;
   }
 }
@@ -260,10 +240,10 @@ export class IfStatementNode extends StatementNode {
     return thread.suspended_or_ok();
   }
 
-  typecheck(e: TypeEnvironment, e_all: TypeEnvironment, sub: Substitution, r: Term, ctx: TypecheckContext): TypeEnvironment {
-    this.condition.check(create_type("bool"), e, sub, ctx, e_all);
-    this.then_body.typecheck(e, e_all, sub, r, ctx);
-    if (this.else_body) this.else_body.typecheck(e, e_all, sub, r, ctx);
+  typecheck({ e, e_all, sub, r, ctx }: TypecheckState): TypeEnvironment {
+    this.condition.check(create_type("bool"), { e, sub, ctx, e_all });
+    this.then_body.typecheck({ e, e_all, sub, r, ctx });
+    if (this.else_body) this.else_body.typecheck({ e, e_all, sub, r, ctx });
     return e;
   }
 }
@@ -288,8 +268,8 @@ class LoopConditionNode extends StatementNode {
     return thread.suspended_or_ok();
   }
 
-  typecheck(e: TypeEnvironment, e_all: TypeEnvironment, sub: Substitution, r: Term, ctx: TypecheckContext): TypeEnvironment {
-    if (this.condition) this.condition.check(create_type("bool"), e, sub, ctx, e_all);
+  typecheck({ e, e_all, sub, ctx }: TypecheckState): TypeEnvironment {
+    if (this.condition) this.condition.check(create_type("bool"), { e, sub, ctx, e_all });
     return e;
   }
 }
@@ -342,10 +322,10 @@ export class WhileStatementNode extends StatementNode {
     return run_loop(thread, frame, interpreter, [new LoopConditionNode(this.condition), this.body], 0, 0, this.label);
   }
 
-  typecheck(e: TypeEnvironment, e_all: TypeEnvironment, sub: Substitution, r: Term, ctx: TypecheckContext): TypeEnvironment {
-    if (this.condition) this.condition.check(create_type("bool"), e, sub, ctx, e_all);
+  typecheck({ e, e_all, sub, r, ctx }: TypecheckState): TypeEnvironment {
+    if (this.condition) this.condition.check(create_type("bool"), { e, sub, ctx, e_all });
     // the loop runs in a forked environment, so its variables do not leak out
-    this.body.typecheck(new Map(e), new Map(e_all), sub, r, ctx);
+    this.body.typecheck({ e: new Map(e), e_all: new Map(e_all), sub, r, ctx });
     return e;
   }
 }
@@ -363,10 +343,10 @@ export class DoWhileStatementNode extends StatementNode {
     return run_loop(thread, frame, interpreter, [this.body, new LoopConditionNode(this.condition)], 0, 1, this.label);
   }
 
-  typecheck(e: TypeEnvironment, e_all: TypeEnvironment, sub: Substitution, r: Term, ctx: TypecheckContext): TypeEnvironment {
-    if (this.condition) this.condition.check(create_type("bool"), e, sub, ctx, e_all);
+  typecheck({ e, e_all, sub, r, ctx }: TypecheckState): TypeEnvironment {
+    if (this.condition) this.condition.check(create_type("bool"), { e, sub, ctx, e_all });
     // the loop runs in a forked environment, so its variables do not leak out
-    this.body.typecheck(new Map(e), new Map(e_all), sub, r, ctx);
+    this.body.typecheck({ e: new Map(e), e_all: new Map(e_all), sub, r, ctx });
     return e;
   }
 }
@@ -397,14 +377,14 @@ export class ForStatementNode extends StatementNode {
     return run_loop(thread, frame, interpreter, statements, condition_index, continue_index, this.label);
   }
 
-  typecheck(e: TypeEnvironment, e_all: TypeEnvironment, sub: Substitution, r: Term, ctx: TypecheckContext): TypeEnvironment {
+  typecheck({ e, e_all, sub, r, ctx }: TypecheckState): TypeEnvironment {
     // the loop runs in a forked environment, so its variables do not leak out
     const loop_env_all = new Map(e_all);
     let loop_env = new Map(e);
-    if (this.init) loop_env = this.init.typecheck(loop_env, loop_env_all, sub, r, ctx);
-    if (this.condition) this.condition.check(create_type("bool"), loop_env, sub, ctx, loop_env_all);
-    this.body.typecheck(loop_env, loop_env_all, sub, r, ctx);
-    if (this.update) this.update.infer(loop_env, sub, ctx, loop_env_all);
+    if (this.init) loop_env = this.init.typecheck({ e: loop_env, e_all: loop_env_all, sub, r, ctx });
+    if (this.condition) this.condition.check(create_type("bool"), { e: loop_env, e_all: loop_env_all, sub, ctx });
+    this.body.typecheck({ e: loop_env, e_all: loop_env_all, sub, r, ctx });
+    if (this.update) this.update.infer({ e: loop_env, e_all: loop_env_all, sub, ctx });
     return e;
   }
 }
@@ -439,8 +419,8 @@ export class BreakStatementNode extends StatementNode {
     return { kind: "suspended" };
   }
 
-  typecheck(e: TypeEnvironment) {
-    return e;
+  typecheck(state: TypecheckState): TypeEnvironment {
+    return state.e;
   }
 }
 
@@ -459,7 +439,7 @@ export class ContinueStatementNode extends StatementNode {
     return { kind: "suspended" };
   }
 
-  typecheck(e: TypeEnvironment) {
-    return e;
+  typecheck(state: TypecheckState): TypeEnvironment {
+    return state.e;
   }
 }

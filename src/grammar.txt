@@ -11,7 +11,9 @@
 <DECLARATION: decl>: <VARIABLE_DECLARATION | CLASS_DECLARATION | TYPE_DECLARATION: decl>;
 <VARIABLE_DECLARATION: var_decl>: [LET] [IDENTIFIER: variable_name] ([COLON] <TYPE_EXPRESSION: type>)? [EQUALS] <EXPRESSION: value> [SEMICOLON];
 <FOR_VARIABLE_DECLARATION: for_var_decl>: [LET] [IDENTIFIER: variable_name] ([COLON] <TYPE_EXPRESSION: type>)? [EQUALS] <EXPRESSION: value>;
-<TYPE_DECLARATION: type_decl>: [TYPE] [IDENTIFIER: name] [EQUALS] <TYPE_EXPRESSION: type> [COLON];
+<TYPE_DECLARATION: type_decl>: [TYPE] [IDENTIFIER: name] (<TYPE_PARAMS: type_params>)? [EQUALS] <TYPE_EXPRESSION: type> [COLON];
+<TYPE_PARAMS: type_params>: [LESS_THAN] <TYPE_PARAM_LIST: params> [GREATER_THAN];
+<TYPE_PARAM_LIST: type_param_list>: [IDENTIFIER: param] ([COMMA] <TYPE_PARAM_LIST: rest>)?;
 
 <CLASS_DECLARATION: class_decl>: [CLASS] [IDENTIFIER: class_name] ([EXTENDS] <EXPRESSION: superclass_expr>)? [L_BRACE] (<CLASS_PROPERTIES: class_properties>)? [R_BRACE];
 <CLASS_PROPERTIES: class_properties>: <CLASS_PROPERTY: prop> (<CLASS_PROPERTIES: rest>)?;

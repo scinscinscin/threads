@@ -175,7 +175,7 @@ describe("pass state isolation", () => {
     const a = new TypecheckContext();
     const b = new TypecheckContext();
 
-    a.aliases.declare(token("Pos"), new TypeConcreteNode(token("int")));
+    a.aliases.declare(token("Pos"), null, new TypeConcreteNode(token("int")));
 
     expect(a.aliases.resolve("Pos")).toEqual({ kind: "complete", term: create_type("int") });
 

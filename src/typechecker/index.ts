@@ -86,14 +86,24 @@ export class TypeCheckError extends Error {
 }
 
 /** The resolved form of a type name, whether it names a type alias or a
- *  built-in: either a complete type, or a parametric name that still awaits
- *  its type argument at the use site. */
-export type ResolvedType = { kind: "complete"; term: Term } | { kind: "parametric"; registry: string; arity: number };
+ *  built-in: a complete type, a built-in parametric name that still awaits
+ *  its type arguments at the use site, or a user-defined type constructor
+ *  whose body was lowered with its type parameters bound to fresh variables
+ *  (`param_vars`, one per `params`) and awaits its type arguments at the use
+ *  site. */
+export type ResolvedType =
+  | { kind: "complete"; term: Term }
+  | { kind: "parametric"; registry: string; arity: number }
+  | { kind: "user_parametric"; params: string[]; param_vars: string[]; body: Term };
 
 type AliasEntry = {
   name: string;
-  name_token: Token;
-  target: TypeExpressionNode;
+  /** The declaration's name token; null for a type-parameter binding. */
+  name_token: Token | null;
+  /** The declared type parameters; null for plain aliases and parameter bindings. */
+  params: string[] | null;
+  /** The target type expression; null for a type-parameter binding (whose record is pre-computed). */
+  target: TypeExpressionNode | null;
   record: ResolvedType | null;
   computing: boolean;
 };
@@ -119,15 +129,39 @@ export class AliasTable {
 
   /** Register a new alias in the innermost scope. The name must not be a
    *  built-in type name and must not already be bound in the same scope
-   *  (shadowing outer scopes is allowed, mirroring lets). */
-  declare(name_token: Token, target: TypeExpressionNode): void {
+   *  (shadowing outer scopes is allowed, mirroring lets). When `params` is
+   *  given the alias is a user-defined type constructor: the parameter names
+   *  must not duplicate each other or a built-in type name. */
+  declare(name_token: Token, params: Token[] | null, target: TypeExpressionNode): void {
     const name = name_token.lexeme;
     if (type_names[name] !== undefined)
       throw new TypeCheckError(`Cannot define a type alias for the built-in type name "${name}"`, name_token);
 
+    // Check that type param name won't shadow intrinsic types and
+    const seen = new Set<string>();
+    if (params !== null) {
+      for (const param of params) {
+        if (type_names[param.lexeme] !== undefined)
+          throw new TypeCheckError(
+            `Cannot define a type parameter for the built-in type name "${param.lexeme}"`,
+            param,
+          );
+
+        if (seen.has(param.lexeme)) throw new TypeCheckError(`Duplicate type parameter "${param.lexeme}"`, param);
+        seen.add(param.lexeme);
+      }
+    }
+
     const scope = this.scopes[this.scopes.length - 1];
     if (scope.has(name)) throw new TypeCheckError(`Duplicate type alias "${name}"`, name_token);
-    scope.set(name, { name, name_token, target, record: null, computing: false });
+    scope.set(name, {
+      name,
+      name_token,
+      params: params?.map((p) => p.lexeme) ?? null,
+      target,
+      record: null,
+      computing: false,
+    });
   }
 
   /** The record of a declared alias; throws a plain error when the name was
@@ -159,9 +193,26 @@ export class AliasTable {
     const scope = this.scopes[this.scopes.length - 1];
     return [...scope.values()].map((entry) => ({
       name: entry.name,
-      name_token: entry.name_token,
+      // parameter-scope bindings are always popped before a pass ends, so the
+      // top-level scope holds only declarations
+      name_token: entry.name_token!,
       record: entry.record!,
     }));
+  }
+
+  /** Instantiate a user-defined type constructor: substitute the argument
+   *  types for its type parameters in the body lowered at declaration. Every
+   *  use gets an independent term; the stored body is untouched. */
+  apply_user_constructor(name: string, args: Term[]): Term {
+    const entry = this.find_entry(name);
+    if (entry === undefined) throw new Error(`Type alias "${name}" is not declared`);
+
+    const record = this.compute_record(entry);
+    if (record.kind !== "user_parametric") throw new Error(`Type "${name}" is not a type constructor`);
+
+    const subst = new Map<string, Term>();
+    for (let i = 0; i < record.param_vars.length; i++) subst.set(record.param_vars[i], args[i]);
+    return apply_term(record.body, subst);
   }
 
   /** Find an alias entry by name, walking the scopes innermost-first. */
@@ -177,11 +228,12 @@ export class AliasTable {
    *  circular alias definition. */
   private compute_record(entry: AliasEntry): ResolvedType {
     if (entry.record !== null) return entry.record;
-    if (entry.computing) throw new TypeCheckError(`Circular type alias definition: "${entry.name}"`, entry.name_token);
+    if (entry.target === null) throw new Error(`Type "${entry.name}" has no target`);
+    if (entry.computing) throw new TypeCheckError(`Circular type alias definition: "${entry.name}"`, entry.name_token!);
 
     entry.computing = true;
     try {
-      entry.record = this.lower_target(entry.target);
+      entry.record = this.lower_target(entry.target, entry.params);
     } finally {
       entry.computing = false;
     }
@@ -189,12 +241,47 @@ export class AliasTable {
     return entry.record;
   }
 
-  /** Lower an alias target to a record. A bare name goes through the unified
-   *  resolver (which handles alias chains and built-in names); any other target
-   *  node lowers to a complete type. */
-  private lower_target(target: TypeExpressionNode): ResolvedType {
-    if (target instanceof TypeConcreteNode) return this.resolve(target.name.lexeme, target.name);
+  /** Lower an alias target to a record. A target with type parameters is a
+   *  user-defined type constructor: its body is lowered once, with the
+   *  parameters bound to fresh variables, and each use substitutes its type
+   *  arguments for those variables. Because the lowering happens inside
+   *  `compute_record`, a body that references its own constructor (directly
+   *  or through other constructors) is a circular definition. A bare name
+   *  goes through the unified resolver (which handles alias chains and
+   *  built-in names); any other target node lowers to a complete type. */
+  private lower_target(target: TypeExpressionNode, params: string[] | null): ResolvedType {
+    if (params !== null) {
+      const param_vars: string[] = [];
+      this.push_scope();
+      
+      try {
+        for (const param of params) {
+          const v = this.ctx.fresh.next();
+          param_vars.push(v.name);
+          this.bind_param(param, { kind: "complete", term: v });
+        }
+
+        return { kind: "user_parametric", params, param_vars, body: target.lower(this.ctx) };
+      } finally {
+        this.pop_scope();
+      }
+    }
+
+    if (target instanceof TypeConcreteNode) {
+      const resolved = this.resolve(target.name.lexeme, target.name);
+      if (resolved.kind === "user_parametric")
+        throw new TypeCheckError(`Type "${target.name.lexeme}" requires a type argument`, target.name);
+      return resolved;
+    }
     return { kind: "complete", term: target.lower(this.ctx) };
+  }
+
+  /** Bind a type parameter name to a pre-computed record in the innermost
+   *  scope while lowering a type constructor's body. The names were validated
+   *  when the constructor was declared. */
+  private bind_param(name: string, record: ResolvedType): void {
+    const scope = this.scopes[this.scopes.length - 1];
+    scope.set(name, { name, name_token: null, params: null, target: null, record, computing: false });
   }
 }
 
@@ -403,7 +490,8 @@ export function typecheck(program: ProgramNode): { env: TypeEnvironment; sub: Su
   // Two passes: all names are declared first, then all records are computed,
   // so top-level aliases may reference each other in any order.
   for (const stmt of program.statements.get_items())
-    if (stmt instanceof TypeDeclarationNode) ctx.aliases.declare(stmt.name, stmt.type);
+    if (stmt instanceof TypeDeclarationNode)
+      ctx.aliases.declare(stmt.name, stmt.params?.get_items() ?? null, stmt.type);
 
   for (const stmt of program.statements.get_items())
     if (stmt instanceof TypeDeclarationNode) stmt.registered = ctx.aliases.record(stmt.name.lexeme);
@@ -437,7 +525,7 @@ export function typecheck(program: ProgramNode): { env: TypeEnvironment; sub: Su
   let environment2 = environment;
   for (const stmt of program.statements.get_items()) {
     const r = create_type("void");
-    environment2 = stmt.typecheck(environment2, all_environment, substitution, r, ctx);
+    environment2 = stmt.typecheck({ e: environment2, e_all: all_environment, sub: substitution, r, ctx });
   }
   return { env: environment2, sub: substitution, ctx };
 }

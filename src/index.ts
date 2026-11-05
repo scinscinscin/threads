@@ -4,7 +4,8 @@ import { Interpreter } from "./interpreter";
 import { parse_program } from "./parser";
 import { VariableDeclarationNode } from "./parser/nodes/statements";
 import { show_polytype, TypeCheckError, typecheck } from "./typechecker";
-import { compound, show_type, variable } from "./typechecker/ast";
+import { compound, show_type, Term, variable } from "./typechecker/ast";
+import { apply_term } from "./typechecker/unify";
 
 async function main() {
   const args = process.argv.slice(2);
@@ -40,16 +41,21 @@ async function main() {
     }
 
     for (const { name, name_token, record } of checked.ctx.aliases.top_level()) {
-      const shown = show_type(
-        record.kind === "complete"
-          ? record.term
-          : compound(
-              record.registry,
-              Array.from({ length: record.arity }, () => variable("t")),
-            ),
-      );
+      let shown: string;
+      let params = "";
+      if (record.kind === "complete") {
+        shown = show_type(record.term);
+      } else if (record.kind === "parametric") {
+        shown = show_type(compound(record.registry, Array.from({ length: record.arity }, () => variable("t"))));
+      } else {
+        // a user-defined type constructor: show the body with its type
+        // parameters renamed back to their declared names
+        const renamed = new Map<string, Term>(record.params.map((param, i) => [record.param_vars[i], variable(param)]));
+        shown = show_type(apply_term(record.body, renamed));
+        params = `<${record.params.join(", ")}>`;
+      }
 
-      console.error(`[types] ${name_token.line}:${name_token.column} type ${name} = ${shown}`);
+      console.error(`[types] ${name_token.line}:${name_token.column} type ${name}${params} = ${shown}`);
     }
   }
 

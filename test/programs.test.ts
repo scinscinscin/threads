@@ -883,3 +883,188 @@ type A = A:
     );
   });
 });
+
+describe("typechecker: type constructors (accepted)", () => {
+  it("substitutes type arguments for the declared parameters", () => {
+    typecheck_source(`
+type Testing<A, B, C> = A[]:
+let x: Testing<int, bool, str> = [1];
+print(x[0]);
+`);
+  });
+
+  it("substitutes into object, array, and function types in the body", () => {
+    typecheck_source(`
+type Pair<A, B> = {first: A; second: B}:
+let p: Pair<int, str> = {first: 1, second: "a"};
+print(p.first);
+type F<A> = A[]:
+let v: F<F<int>> = [[1]];
+print(v[0][0]);
+type Id<A> = (A) => A:
+let f: Id<int> = function(x): int {
+  return x + 1;
+};
+print(f(1));
+`);
+  });
+
+  it("nests one constructor's use inside another's body", () => {
+    typecheck_source(`
+type F<A> = G<A>[]:
+type G<B> = {x: B}:
+let v: F<int> = [{x: 1}];
+print(v[0].x);
+`);
+  });
+
+  it("scopes a parameter over the alias table, shadowing outer aliases", () => {
+    typecheck_source(`
+type A = str:
+type F<A> = A:
+let x: F<int> = 1;
+let y: A = "s";
+print(x);
+print(y);
+`);
+  });
+
+  it("allows a parameter to have the alias's own name", () => {
+    typecheck_source(`
+type A<A> = A:
+let x: A<str> = "s";
+print(x);
+`);
+  });
+
+  it("uses a constructor as a built-in's type argument", () => {
+    typecheck_source(`
+type Pair<A, B> = {first: A; second: B}:
+let make = async function(): Pair<int, bool> {
+  return {first: 1, second: true};
+};
+let p: Promise<Pair<int, bool>> = make();
+let q = await p;
+print(q.first);
+`);
+  });
+
+  it("aliases an applied constructor to a complete type", () => {
+    typecheck_source(`
+type Pair<A, B> = {first: A; second: B}:
+type IP = Pair<int, bool>:
+let p: IP = {first: 1, second: true};
+print(p.second);
+`);
+  });
+
+  it("scopes a constructor to its block and allows shadowing", () => {
+    typecheck_source(`
+type W<A> = str:
+{
+  type W<A> = int:
+  let x: W<int> = 1;
+  print(x);
+}
+let y: W<str> = "s";
+print(y);
+`);
+  });
+});
+
+describe("typechecker: type constructors (rejected)", () => {
+  it("rejects a bare use of a type constructor", () => {
+    expect_type_error(
+      `
+type Testing<A, B, C> = A[]:
+let x: Testing = 1;
+`,
+      `Type "Testing" requires a type argument`,
+    );
+  });
+
+  it("rejects too few type arguments", () => {
+    expect_type_error(
+      `
+type Testing<A, B, C> = A[]:
+let x: Testing<int> = [1];
+`,
+      `Type "Testing" takes 3 type arguments, got 1`,
+    );
+  });
+
+  it("rejects too many type arguments", () => {
+    expect_type_error(
+      `
+type Testing<A, B, C> = A[]:
+let x: Testing<int, bool, str, int> = [1];
+`,
+      `Type "Testing" takes 3 type arguments, got 4`,
+    );
+  });
+
+  it("rejects a duplicate type parameter", () => {
+    expect_type_error(
+      `
+type F<A, A> = int:
+`,
+      `Duplicate type parameter "A"`,
+    );
+  });
+
+  it("rejects a built-in type name as a type parameter", () => {
+    expect_type_error(
+      `
+type F<int> = int:
+`,
+      `Cannot define a type parameter for the built-in type name "int"`,
+    );
+  });
+
+  it("rejects an unknown type name in a constructor's body", () => {
+    expect_type_error(
+      `
+type F<A> = float[]:
+`,
+      `Unknown type name: "float"`,
+    );
+  });
+
+  it("rejects a type argument on a type parameter", () => {
+    expect_type_error(
+      `
+type F<A> = A<int>:
+`,
+      `Type "A" takes no type arguments`,
+    );
+  });
+
+  it("rejects a self-referential type constructor", () => {
+    expect_type_error(
+      `
+type F<A> = F<int>:
+`,
+      `Circular type alias definition: "F"`,
+    );
+  });
+
+  it("rejects mutually recursive type constructors", () => {
+    expect_type_error(
+      `
+type F<A> = G<A>:
+type G<A> = F<A>:
+`,
+      `Circular type alias definition: "F"`,
+    );
+  });
+
+  it("rejects a bare type constructor as an alias target", () => {
+    expect_type_error(
+      `
+type F<A> = int:
+type G = F:
+`,
+      `Type "F" requires a type argument`,
+    );
+  });
+});
