@@ -53,7 +53,7 @@ lexerGenerator.addRule("colon", "$:", TokenType.COLON);
 lexerGenerator.addRule("dot", "$.", TokenType.DOT);
 lexerGenerator.addRule("arrow", "$=$>", TokenType.ARROW);
 
-lexerGenerator.addRule("number_literal", "(${__decimal_digit})+", TokenType.NUMBER_LITERAL);
+lexerGenerator.addRule("number_literal", "(${__decimal_digit})+($.(${__decimal_digit})+)?", TokenType.NUMBER_LITERAL);
 lexerGenerator.addRule("character", "${__letter} | ${__decimal_digit} | ${__symbol_no_quote} | $ ");
 lexerGenerator.addRule("string_literal", '$"(${character} | $\')*$"', TokenType.STRING_LITERAL, (str) =>
   str.substring(1, str.length - 1).replaceAll("\\n", "\n"),

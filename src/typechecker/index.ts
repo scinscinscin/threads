@@ -14,7 +14,7 @@ const create_no_arg_type_constructor =
   };
 
 const type_constructors = {
-  int: create_no_arg_type_constructor("int"),
+  number: create_no_arg_type_constructor("number"),
   bool: create_no_arg_type_constructor("bool"),
   void: create_no_arg_type_constructor("void"),
   str: create_no_arg_type_constructor("str"),
@@ -39,7 +39,7 @@ export function create_type(name: string, args: Term[] = []): Term {
 type TypeNameInfo = { registry: keyof typeof type_constructors; arity: number };
 
 const type_names: Record<string, TypeNameInfo> = {
-  int: { registry: "int", arity: 0 },
+  number: { registry: "number", arity: 0 },
   bool: { registry: "bool", arity: 0 },
   void: { registry: "void", arity: 0 },
   str: { registry: "str", arity: 0 },
@@ -112,7 +112,7 @@ type AliasEntry = {
  *  per block like value bindings, but they live in the type namespace: a scope
  *  is pushed for each block, and top-level aliases are pre-registered in the
  *  outermost scope at the start of the pass. The owning context is kept so a
- *  non-bare-name target (`type P = Promise<int>:`) can be lowered. */
+ *  non-bare-name target (`type P = Promise<number>:`) can be lowered. */
 export class AliasTable {
   private scopes: Array<Map<string, AliasEntry>> = [new Map()];
 
@@ -253,7 +253,7 @@ export class AliasTable {
     if (params !== null) {
       const param_vars: string[] = [];
       this.push_scope();
-      
+
       try {
         for (const param of params) {
           const v = this.ctx.fresh.next();
@@ -299,7 +299,7 @@ export class TypecheckContext {
 }
 
 /** Unify two types, throwing a TypeCheckError with both rendered types on failure. */
-export function check_unify(actual: Term, expected: Term, sub: Substitution, message?: string, token?: Token): void {
+export function unify_check(actual: Term, expected: Term, sub: Substitution, message?: string, token?: Token): void {
   if (!unify_write(actual, expected, sub)) {
     throw new TypeCheckError(
       `${message ?? "Type mismatch"}: got ${show_type(resolve(actual, sub.map))}, expected ${show_type(
@@ -323,7 +323,10 @@ export interface IntrinsicSignature {
 
 export const intrinsics: Map<string, IntrinsicSignature> = new Map([
   ["print", { params: [create_type("any")], variadic: true, return: create_type("bool") }],
-  ["resolve", { params: [create_type("any")], variadic: true, return: create_type("promise", [create_type("int")]) }],
+  [
+    "resolve",
+    { params: [create_type("any")], variadic: true, return: create_type("promise", [create_type("number")]) },
+  ],
 ]);
 
 /** Check a call to a builtin against its signature, throwing on violation. */
@@ -343,24 +346,26 @@ export function check_intrinsic_call(
   for (let i = 0; i < arg_types.length; i++) {
     const param = resolve(sig.variadic ? sig.params[0] : sig.params[i], sub.map);
     if (param.kind === "atom" && param.name === "any") continue;
-    check_unify(arg_types[i], param, sub, `Argument ${i + 1} of ${name}`);
+    unify_check(arg_types[i], param, sub, `Argument ${i + 1} of ${name}`);
   }
 }
 
 export type PolyType = { vars: string[]; type: Term };
-/** `builtin` marks the global `print`/`resolve` entries so call sites can tell
+/** `mutable` marks user-declared values that can be reassigned (`let`
+ *  declarations and function parameters); assignment to an immutable binding
+ *  is a type error.
+ *  `builtin` marks the global `print`/`resolve` entries so call sites can tell
  *  them apart from user declarations that shadow the same name.
  *  `placeholder` names the variable a pre-registered declaration was registered
  *  under; the declaration commits its inferred type to that variable when it is
  *  processed, and `generalize` keeps variables of other placeholders' classes
  *  undeclared so their constraints survive. */
 export type Binding = { poly: PolyType; mutable: boolean; builtin?: boolean; placeholder?: string };
-export const create_binding = (poly: PolyType, mutable = false, builtin = false, placeholder?: string): Binding => ({
-  poly,
-  mutable,
-  builtin,
-  placeholder,
-});
+export type BindingOptions = { mutable?: boolean; builtin?: boolean; placeholder?: string };
+export const create_binding = (
+  poly: PolyType,
+  { mutable = false, builtin = false, placeholder }: BindingOptions = {},
+): Binding => ({ poly, mutable, builtin, placeholder });
 
 export type TypeEnvironment = Map<string, Binding>;
 
@@ -510,8 +515,7 @@ const globals = Object.fromEntries(
     name,
     create_binding(
       { vars: [], type: create_type("f", [...(sig.variadic ? [sig.params[0]] : sig.params), sig.return]) },
-      false,
-      true,
+      { builtin: true },
     ),
   ]),
 ) as { [key: string]: Binding };
@@ -545,28 +549,23 @@ export function typecheck(program: ProgramNode): { env: TypeEnvironment; sub: Su
   // placeholder variable, which the declaration commits to its inferred type
   // when it is processed. Duplicate names are not pre-registered: the later let
   // overwrites the earlier one, exactly like the live environment.
-  const name_counts = new Map<string, number>();
-  for (const stmt of program.statements.get_items()) {
-    if (stmt instanceof VariableDeclarationNode) {
-      const name = stmt.variable_name.lexeme;
-      name_counts.set(name, (name_counts.get(name) ?? 0) + 1);
-    }
-  }
   for (const stmt of program.statements.get_items()) {
     if (!(stmt instanceof VariableDeclarationNode)) continue;
-    if (name_counts.get(stmt.variable_name.lexeme) !== 1) continue;
     if (stmt.type !== null) {
-      stmt.registered = create_binding({ vars: [], type: stmt.type.lower(ctx) }, true);
+      stmt.registered = create_binding({ vars: [], type: stmt.type.lower(ctx) }, { mutable: true });
     } else {
       const placeholder = ctx.fresh.next();
-      stmt.registered = create_binding({ vars: [], type: placeholder }, true, false, placeholder.name);
+      stmt.registered = create_binding(
+        { vars: [], type: placeholder },
+        { mutable: true, placeholder: placeholder.name },
+      );
     }
     all_environment.set(stmt.variable_name.lexeme, stmt.registered);
   }
 
-  let environment2 = environment;
+  let threaded_env = environment;
   const r = create_type("void");
-  for (const stmt of program.statements.get_items()) 
-    environment2 = stmt.typecheck({ e: environment2, e_all: all_environment, sub: substitution, r, ctx });
-  return { env: environment2, sub: substitution, ctx };
+  for (const stmt of program.statements.get_items())
+    threaded_env = stmt.typecheck({ e: threaded_env, e_all: all_environment, sub: substitution, r, ctx });
+  return { env: threaded_env, sub: substitution, ctx };
 }

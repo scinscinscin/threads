@@ -5,8 +5,8 @@ import { Substitution } from "../src/typechecker/unify";
 
 describe("show_polytype", () => {
   it("renders a monomorphic type", () => {
-    expect(show_polytype({ vars: [], type: create_type("f", [create_type("int"), create_type("int")]) })).toBe(
-      "int -> int",
+    expect(show_polytype({ vars: [], type: create_type("f", [create_type("number"), create_type("number")]) })).toBe(
+      "number -> number",
     );
   });
 
@@ -17,8 +17,8 @@ describe("show_polytype", () => {
 
   it("resolves the body through the given substitution", () => {
     const sub = new Substitution();
-    sub.bind("t3", create_type("int"));
-    expect(show_polytype({ vars: [], type: variable("t3") }, sub)).toBe("int");
+    sub.bind("t3", create_type("number"));
+    expect(show_polytype({ vars: [], type: variable("t3") }, sub)).toBe("number");
   });
 
   it("keeps declared variables displayed as themselves even when reads instantiated them", () => {
@@ -26,7 +26,7 @@ describe("show_polytype", () => {
     // instantiate_binding binds a declared variable to a per-read fresh variable,
     // which may then be constrained by the call site
     sub.bind("t3", variable("t9"));
-    sub.bind("t9", create_type("int"));
+    sub.bind("t9", create_type("number"));
     const poly = { vars: ["t3"], type: compound("f", [variable("t3"), variable("t3")]) };
     expect(show_polytype(poly, sub)).toBe("forall t3. t3 -> t3");
   });

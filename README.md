@@ -28,14 +28,14 @@ The `examples/` directory contains runnable programs: `type_aliases.lol`,
 
 ### Language
 
-- **Values:** integers (no floats), double-quoted strings, booleans, `null`,
+- **Values:** numbers (no int/float distinction), double-quoted strings, booleans, `null`,
   arrays (`[1, 2]`, indexed access `a[0]`), and objects (`{x: 1, y: 2}`,
   dot access `p.x`).
 - **Operators:**
-  - arithmetic: `+` (overloaded: int + int, str + str), `-`, `*`, `/`
-    (integers; division by zero is an error)
+  - arithmetic: `+` (overloaded: number + number, str + str), `-`, `*`, `/`
+    (numbers; division by zero is an error; `/` may yield a fraction)
   - equality: `==`, `!=` (any two values)
-  - comparison: `<`, `>`, `<=`, `>=` (integers, yield bool)
+  - comparison: `<`, `>`, `<=`, `>=` (numbers, yield bool)
   - logic: `&&`, `||` (short-circuiting; both sides must share a type, since
     the result is one of the operands)
   - unary: `-`, `!`, and `await`
@@ -84,7 +84,7 @@ The `examples/` directory contains runnable programs: `type_aliases.lol`,
   function parameters/returns (`function(p: T): R { ... }`). Annotated
   declarations are checked and stay monomorphic; async functions annotate the
   *inner* return type (it is auto promise-wrapped).
-- **Type expressions:** the built-in names `int`, `bool`, `void`, `str`,
+- **Type expressions:** the built-in names `number`, `bool`, `void`, `str`,
   `null`, `any`; parametric `Promise<T>` (also `promise<T>`); repeatable
   array types `T[]`; function types `(T1, ..., Tn) => R`; and object types
   `{a: T; b: T}` (identifier or string-literal keys, `;`-delimited).
@@ -113,12 +113,12 @@ typechecker in `src/typechecker/` checks it before the `Interpreter` ever
 runs. The typechecker never touches the runtime - declarations like `type`
 aliases are runtime no-ops.
 
-**Types are terms.** A type is a `Term`: an atom (`int`), a type variable
-(`t3`), or a compound term (`promise(int)`, `array(int)`, `f(int, bool)`,
-`obj(x(int), y(int))`). Checking is unification of terms with a trail-based
+**Types are terms.** A type is a `Term`: an atom (`number`), a type variable
+(`t3`), or a compound term (`promise(number)`, `array(number)`, `f(number, bool)`,
+`obj(x(number), y(number))`). Checking is unification of terms with a trail-based
 substitution (`unify.ts`): bindings are recorded on a trail so a whole
 branch can be undone with `unmark`. Backtracking matters in practice for
-`+`, which is overloaded int/str and tries both readings.
+`+`, which is overloaded number/str and tries both readings.
 
 **The inference walk.** Expressions implement `infer(state)` (return the
 inferred term) and `check(type, state)`; statements implement
@@ -193,10 +193,11 @@ src/
   parser/nodes/       AST nodes: base, statements, expressions, types
   typechecker/
     index.ts          TypecheckContext, AliasTable, generalize/instantiate,
-                      two-phase typecheck() driver, error type
+                      two-phase typecheck() driver, error type, builtin
+                      signatures (intrinsics map)
     ast.ts            Term (atom/var/compound), show_type
     unify.ts          trail substitution, unify_write, apply_term
-    intrinsics.ts     builtin signatures (print, resolve)
+    operators.ts      operator typing tables + infer_*_operator
 test/                 vitest: typechecker units + end-to-end parse+typecheck
 examples/             runnable .lol programs
 ```
@@ -209,5 +210,5 @@ examples/             runnable .lol programs
 - CI (`.github/workflows/ci.yml`) runs typecheck, tests, and the example on
   push to main.
 - Known gaps: the grammar admits `class` declarations, but the parser
-  reports them as not implemented; numbers are integers only; the only
-  builtins are `print` and `resolve`.
+  reports them as not implemented; number literals are whole numbers
+  (fractions arise from division); the only builtins are `print` and `resolve`.

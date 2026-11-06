@@ -19,7 +19,7 @@ import { body_has_return, is_void } from "./statements";
 import type { BlockStatementNode } from "./statements";
 import {
   check_intrinsic_call,
-  check_unify,
+  unify_check,
   create_binding,
   create_type,
   generalize,
@@ -31,6 +31,7 @@ import {
   TypeEnvironment,
 } from "../../typechecker";
 import { TypeExpressionNode } from "./types";
+import { infer_binary_operator, infer_unary_operator } from "../../typechecker/operators";
 import { resolve, Substitution, unify_write } from "../../typechecker/unify";
 import { compound, show_type, Term, variable } from "../../typechecker/ast";
 
@@ -87,35 +88,11 @@ export class UnaryExpressionNode extends ExpressionNode {
   }
 
   infer({ e, sub, ctx, e_all }: ExprTypecheckState): Term {
-    if (this.op.type === TokenType.MINUS) {
-      const operand = this.operand.infer({ e, sub, ctx, e_all });
-      check_unify(operand, create_type("int"), sub, `Unary "-" requires an int operand`);
-      return create_type("int");
-    }
-
-    if (this.op.type === TokenType.NOT) {
-      this.operand.infer({ e, sub, ctx, e_all });
-      return create_type("bool");
-    }
-
-    if (this.op.type === TokenType.AWAIT) {
-      const operand = this.operand.infer({ e, sub, ctx, e_all });
-      // a promise unwraps to its inner type; anything else passes through
-      // with its own type, mirroring the runtime
-      const m = sub.mark();
-
-      const inner = ctx.fresh.next();
-      if (unify_write(operand, create_type("promise", [inner]), sub)) return resolve(inner, sub.map);
-      sub.unmark(m);
-
-      return operand;
-    }
-
-    throw new TypeCheckError(`Unsupported unary operator token: ${TokenType[this.op.type]}`, this.op);
+    return infer_unary_operator(this.op.type, this.operand.infer({ e, sub, ctx, e_all }), sub, ctx, this.op);
   }
 
   check(type: Term, { e, sub, ctx, e_all }: ExprTypecheckState): void {
-    check_unify(this.infer({ e, sub, ctx, e_all }), type, sub);
+    unify_check(this.infer({ e, sub, ctx, e_all }), type, sub);
   }
 }
 
@@ -192,63 +169,9 @@ export class BinaryExpressionNode extends ExpressionNode {
   }
 
   infer({ e, sub, ctx, e_all }: ExprTypecheckState): Term {
-    const op = this.op.type;
-
-    if (op === TokenType.AND || op === TokenType.OR) {
-      // the short-circuit operators return one of their operands, so both
-      // sides must share a type
-
-      const left = this.left.infer({ e, sub, ctx, e_all });
-      const right = this.right.infer({ e, sub, ctx, e_all });
-
-      check_unify(right, left, sub, `"${this.op.lexeme}" operands must have the same type`);
-      return resolve(left, sub.map);
-    }
-
-    if (op === TokenType.PLUS) {
-      const left = this.left.infer({ e, sub, ctx, e_all });
-      const right = this.right.infer({ e, sub, ctx, e_all });
-
-      // overloaded: int + int or str + str, decided by backtracking
-      const m = sub.mark();
-      if (unify_write(left, create_type("int"), sub) && unify_write(right, create_type("int"), sub))
-        return create_type("int");
-      sub.unmark(m);
-
-      const m2 = sub.mark();
-      if (unify_write(left, create_type("str"), sub) && unify_write(right, create_type("str"), sub))
-        return create_type("str");
-
-      sub.unmark(m2);
-      throw new TypeCheckError(`Unsupported operands for "+"`, this.op);
-    }
-
     const left = this.left.infer({ e, sub, ctx, e_all });
     const right = this.right.infer({ e, sub, ctx, e_all });
-
-    if (op === TokenType.MINUS || op === TokenType.MULTIPLY || op === TokenType.DIVIDE) {
-      check_unify(left, create_type("int"), sub, `Left operand of "${this.op.lexeme}"`);
-      check_unify(right, create_type("int"), sub, `Right operand of "${this.op.lexeme}"`);
-      return create_type("int");
-    }
-
-    if (op === TokenType.EQUAL_EQUAL || op === TokenType.NOT_EQUAL) {
-      // the runtime compares any two values, so both sides stay unconstrained
-      return create_type("bool");
-    }
-
-    if (
-      op === TokenType.LESS_THAN ||
-      op === TokenType.GREATER_THAN ||
-      op === TokenType.LESS_EQUAL ||
-      op === TokenType.GREATER_EQUAL
-    ) {
-      check_unify(left, create_type("int"), sub, `Left operand of "${this.op.lexeme}"`);
-      check_unify(right, create_type("int"), sub, `Right operand of "${this.op.lexeme}"`);
-      return create_type("bool");
-    }
-
-    throw new TypeCheckError(`Unsupported operator token: ${TokenType[op]}`, this.op);
+    return infer_binary_operator(this.op.type, left, right, sub, ctx, this.op);
   }
 
   check(type: Term, { e, sub, ctx, e_all }: ExprTypecheckState): void {
@@ -259,7 +182,7 @@ export class BinaryExpressionNode extends ExpressionNode {
       return;
     }
 
-    check_unify(this.infer({ e, sub, ctx, e_all }), type, sub);
+    unify_check(this.infer({ e, sub, ctx, e_all }), type, sub);
   }
 }
 
@@ -279,7 +202,7 @@ export class LiteralExpressionNode extends ExpressionNode {
 
   infer(_state: ExprTypecheckState): Term {
     const t = this.value.type;
-    if (t === TokenType.NUMBER_LITERAL) return create_type("int");
+    if (t === TokenType.NUMBER_LITERAL) return create_type("number");
     if (t === TokenType.STRING_LITERAL) return create_type("str");
     if (t === TokenType.BOOLEAN_LITERAL) return create_type("bool");
     if (t === TokenType.NULL_LITERAL) return create_type("null");
@@ -287,7 +210,7 @@ export class LiteralExpressionNode extends ExpressionNode {
   }
 
   check(type: Term, { e, sub, ctx, e_all }: ExprTypecheckState): void {
-    check_unify(this.infer({ e, sub, ctx, e_all }), type, sub, `Literal "${this.value.lexeme}"`);
+    unify_check(this.infer({ e, sub, ctx, e_all }), type, sub, `Literal "${this.value.lexeme}"`);
   }
 }
 
@@ -308,7 +231,7 @@ export class IdentifierExpressionNode extends ExpressionNode {
   }
 
   check(type: Term, { e, sub, ctx, e_all }: ExprTypecheckState): void {
-    check_unify(this.infer({ e, sub, ctx, e_all }), type, sub, `Variable "${this.identifier.lexeme}"`);
+    unify_check(this.infer({ e, sub, ctx, e_all }), type, sub, `Variable "${this.identifier.lexeme}"`);
   }
 }
 
@@ -371,7 +294,7 @@ export class ArrayAccessExpressionNode extends ExpressionNode {
 
     const elem = ctx.fresh.next();
     if (unify_write(container, create_type("array", [elem]), sub)) {
-      check_unify(index, create_type("int"), sub, "Array index");
+      unify_check(index, create_type("number"), sub, "Array index");
       return resolve(elem, sub.map);
     }
 
@@ -382,7 +305,7 @@ export class ArrayAccessExpressionNode extends ExpressionNode {
   }
 
   check(type: Term, { e, sub, ctx, e_all }: ExprTypecheckState): void {
-    check_unify(this.infer({ e, sub, ctx, e_all }), type, sub);
+    unify_check(this.infer({ e, sub, ctx, e_all }), type, sub);
   }
 }
 
@@ -414,7 +337,7 @@ export class DotAccessExpressionNode extends ExpressionNode {
   }
 
   check(type: Term, { e, sub, ctx, e_all }: ExprTypecheckState): void {
-    check_unify(this.infer({ e, sub, ctx, e_all }), type, sub);
+    unify_check(this.infer({ e, sub, ctx, e_all }), type, sub);
   }
 }
 
@@ -500,7 +423,7 @@ export class AssignmentExpressionNode extends ExpressionNode {
       const before = ctx.fresh.value();
 
       const value_expr_type = this.value.infer({ e, sub, ctx, e_all });
-      check_unify(value_expr_type, declared, sub, `Assignment to "${name}"`);
+      unify_check(value_expr_type, declared, sub, `Assignment to "${name}"`);
       binding.poly = generalize(value_expr_type, e_all ?? e, sub, before, ctx, binding.placeholder);
       return resolve(value_expr_type, sub.map);
     }
@@ -517,7 +440,7 @@ export class AssignmentExpressionNode extends ExpressionNode {
         );
 
       const value = this.value.infer({ e, sub, ctx, e_all });
-      check_unify(value, property_type, sub, `Assignment to "${key}"`);
+      unify_check(value, property_type, sub, `Assignment to "${key}"`);
       return resolve(property_type, sub.map);
     }
 
@@ -530,10 +453,10 @@ export class AssignmentExpressionNode extends ExpressionNode {
       }
 
       const index = this.target.index.infer({ e, sub, ctx, e_all });
-      check_unify(index, create_type("int"), sub, "Array index");
+      unify_check(index, create_type("number"), sub, "Array index");
 
       const value = this.value.infer({ e, sub, ctx, e_all });
-      check_unify(value, array_element_type, sub, "Array assignment");
+      unify_check(value, array_element_type, sub, "Array assignment");
       return resolve(array_element_type, sub.map);
     }
 
@@ -541,7 +464,7 @@ export class AssignmentExpressionNode extends ExpressionNode {
   }
 
   check(type: Term, { e, sub, ctx, e_all }: ExprTypecheckState): void {
-    check_unify(this.infer({ e, sub, ctx, e_all }), type, sub);
+    unify_check(this.infer({ e, sub, ctx, e_all }), type, sub);
   }
 }
 
@@ -601,7 +524,7 @@ export class ObjectLiteralExpressionNode extends ExpressionNode {
   }
 
   check(type: Term, { e, sub, ctx, e_all }: ExprTypecheckState): void {
-    check_unify(this.infer({ e, sub, ctx, e_all }), type, sub, "Object literal");
+    unify_check(this.infer({ e, sub, ctx, e_all }), type, sub, "Object literal");
   }
 }
 
@@ -631,12 +554,12 @@ export class ArrayLiteralExpressionNode extends ExpressionNode {
   infer({ e, sub, ctx, e_all }: ExprTypecheckState): Term {
     const elem = ctx.fresh.next();
     for (const item of this.items.get_items())
-      check_unify(item.infer({ e, sub, ctx, e_all }), elem, sub, "Array element");
+      unify_check(item.infer({ e, sub, ctx, e_all }), elem, sub, "Array element");
     return create_type("array", [resolve(elem, sub.map)]);
   }
 
   check(type: Term, { e, sub, ctx, e_all }: ExprTypecheckState): void {
-    check_unify(this.infer({ e, sub, ctx, e_all }), type, sub, "Array literal");
+    unify_check(this.infer({ e, sub, ctx, e_all }), type, sub, "Array literal");
   }
 }
 
@@ -678,7 +601,7 @@ export class FunctionExpressionNode extends ExpressionNode {
     // placeholders) rather than the live one
     const body_env = new Map(e_all ?? e);
     params.forEach((p, i) => {
-      body_env.set(p.name.lexeme, create_binding({ vars: [], type: parameter_types[i] }, true));
+      body_env.set(p.name.lexeme, create_binding({ vars: [], type: parameter_types[i] }, { mutable: true }));
     });
     this.body.typecheck({ e: body_env, e_all: body_env, sub, r: return_type, ctx });
 
@@ -688,7 +611,7 @@ export class FunctionExpressionNode extends ExpressionNode {
     if (body_has_return(this.body) === false) {
       if (return_type.kind === "var") sub.bind(return_type.name, create_type("null"));
       else if (is_void(return_type, sub) === false)
-        check_unify(create_type("null"), return_type, sub, "Function body falls off the end");
+        unify_check(create_type("null"), return_type, sub, "Function body falls off the end");
     }
 
     // async-ness is encoded in the return type, so calls need no special case
@@ -697,7 +620,7 @@ export class FunctionExpressionNode extends ExpressionNode {
   }
 
   check(type: Term, { e, sub, ctx, e_all }: ExprTypecheckState): void {
-    check_unify(this.infer({ e, sub, ctx, e_all }), type, sub);
+    unify_check(this.infer({ e, sub, ctx, e_all }), type, sub);
   }
 }
 
@@ -766,7 +689,7 @@ export class FunctionCallExpressionNode extends ExpressionNode {
       next_arg: for (let i = 0; i < arity; i++) {
         const param = resolve(resolved_callee.args[i], sub.map);
         if (param.kind === "atom" && param.name === "any") continue next_arg;
-        check_unify(argument_types[i], param, sub, `Argument ${i + 1}`);
+        unify_check(argument_types[i], param, sub, `Argument ${i + 1}`);
       }
 
       return resolve(resolved_callee.args[arity], sub.map);
@@ -785,7 +708,7 @@ export class FunctionCallExpressionNode extends ExpressionNode {
         );
 
       for (let i = 0; i < param_types.length; i++)
-        check_unify(argument_types[i], param_types[i], sub, `Argument ${i + 1}`);
+        unify_check(argument_types[i], param_types[i], sub, `Argument ${i + 1}`);
 
       return resolve(ret, sub.map);
     }
@@ -794,6 +717,6 @@ export class FunctionCallExpressionNode extends ExpressionNode {
   }
 
   check(type: Term, { e, sub, ctx, e_all }: ExprTypecheckState): void {
-    check_unify(this.infer({ e, sub, ctx, e_all }), type, sub);
+    unify_check(this.infer({ e, sub, ctx, e_all }), type, sub);
   }
 }

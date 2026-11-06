@@ -2,7 +2,7 @@ import { CallFrame, Interpreter, LoopFrame, Thread } from "../../interpreter";
 import { Token } from "../../lexer";
 import {
   Binding,
-  check_unify,
+  unify_check,
   create_binding,
   create_type,
   generalize,
@@ -108,13 +108,13 @@ export class VariableDeclarationNode extends StatementNode {
     if (this.type !== null) {
       const annotated_type = this.type.lower(ctx);
       if (this.value !== null)
-        check_unify(this.value.infer({ e, sub, ctx, e_all }), annotated_type, sub, `Initializer for "${name}"`);
+        unify_check(this.value.infer({ e, sub, ctx, e_all }), annotated_type, sub, `Initializer for "${name}"`);
 
       if (this.registered !== undefined) {
         this.registered.poly = { vars: [], type: annotated_type };
         env2.set(name, this.registered);
       } else {
-        const binding = create_binding({ vars: [], type: annotated_type }, true);
+        const binding = create_binding({ vars: [], type: annotated_type }, { mutable: true });
         env2.set(name, binding);
         e_all.set(name, binding);
       }
@@ -133,13 +133,13 @@ export class VariableDeclarationNode extends StatementNode {
     // (duplicate names, block-local lets) get a fresh binding, mirroring the
     // live environment's overwrite semantics
     if (this.registered !== undefined && this.registered.placeholder !== undefined) {
-      check_unify(variable_type, variable(this.registered.placeholder), sub, `Type of "${name}"`, this.variable_name);
+      unify_check(variable_type, variable(this.registered.placeholder), sub, `Type of "${name}"`, this.variable_name);
       this.registered.poly = generalize(variable_type, e_all, sub, before, ctx, this.registered.placeholder);
       env2.set(name, this.registered);
       return env2;
     }
 
-    const binding = create_binding(generalize(variable_type, e_all, sub, before, ctx), true);
+    const binding = create_binding(generalize(variable_type, e_all, sub, before, ctx), { mutable: true });
     env2.set(name, binding);
     e_all.set(name, binding);
     return env2;

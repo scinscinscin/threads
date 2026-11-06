@@ -35,10 +35,10 @@ describe("generalize", () => {
     const sub = new Substitution();
     const from = ctx.fresh.value();
     const t = ctx.fresh.next();
-    sub.bind(t.name, atom("int"));
+    sub.bind(t.name, atom("number"));
     const poly = generalize(t, new Map(), sub, from, ctx);
     expect(poly.vars).toEqual([]);
-    expect(poly.type).toEqual(atom("int"));
+    expect(poly.type).toEqual(atom("number"));
   });
 
   it("declares in-range vars and replaces out-of-range aliases with fresh declared vars", () => {
@@ -67,7 +67,7 @@ describe("generalize", () => {
     const placeholder = ctx.fresh.next();
     const v = ctx.fresh.next();
     sub.bind(placeholder.name, compound("f", [v]));
-    const other = create_binding({ vars: [], type: placeholder }, true, false, placeholder.name);
+    const other = create_binding({ vars: [], type: placeholder }, { mutable: true, placeholder: placeholder.name });
     const env: TypeEnvironment = new Map([["g", other]]);
 
     const from = ctx.fresh.value();
@@ -90,7 +90,10 @@ describe("generalize", () => {
     const placeholder = ctx.fresh.next();
     const declared = ctx.fresh.next();
     sub.bind(placeholder.name, compound("f", [declared]));
-    const other = create_binding({ vars: [declared.name], type: compound("f", [declared]) }, true, false, placeholder.name);
+    const other = create_binding({ vars: [declared.name], type: compound("f", [declared]) }, {
+      mutable: true,
+      placeholder: placeholder.name,
+    });
     const env: TypeEnvironment = new Map([["g", other]]);
 
     const from = ctx.fresh.value();
@@ -109,7 +112,7 @@ describe("generalize", () => {
     const sub = new Substitution();
     // a function-parameter-style binding: an unbound var the binding does not declare
     const param = ctx.fresh.next();
-    const env: TypeEnvironment = new Map([["x", create_binding({ vars: [], type: param }, true)]]);
+    const env: TypeEnvironment = new Map([["x", create_binding({ vars: [], type: param }, { mutable: true })]]);
     expect(env_free_vars(env)).toContain(param.name);
 
     const from = ctx.fresh.value();
@@ -128,10 +131,10 @@ describe("generalize", () => {
     const sub = new Substitution();
     const from = ctx.fresh.value();
     const t = ctx.fresh.next();
-    sub.bind(t.name, create_type("int"));
+    sub.bind(t.name, create_type("number"));
     const poly = generalize(create_type("array", [t]), new Map(), sub, from, ctx);
     expect(poly.vars).toEqual([]);
-    expect(poly.type).toEqual(create_type("array", [create_type("int")]));
+    expect(poly.type).toEqual(create_type("array", [create_type("number")]));
   });
 });
 
@@ -140,7 +143,9 @@ describe("instantiate_binding", () => {
     const ctx = new TypecheckContext();
     const sub = new Substitution();
     const declared = variable("T0");
-    const binding = create_binding({ vars: [declared.name], type: compound("f", [declared, declared]) }, true);
+    const binding = create_binding({ vars: [declared.name], type: compound("f", [declared, declared]) }, {
+      mutable: true,
+    });
 
     const a = instantiate_binding(binding, sub, ctx) as Compound;
     const b = instantiate_binding(binding, sub, ctx) as Compound;
@@ -154,8 +159,8 @@ describe("instantiate_binding", () => {
   it("passes monomorphic types through unchanged", () => {
     const ctx = new TypecheckContext();
     const sub = new Substitution();
-    const binding = create_binding({ vars: [], type: create_type("array", [create_type("int")]) }, true);
-    expect(instantiate_binding(binding, sub, ctx)).toEqual(create_type("array", [create_type("int")]));
+    const binding = create_binding({ vars: [], type: create_type("array", [create_type("number")]) }, { mutable: true });
+    expect(instantiate_binding(binding, sub, ctx)).toEqual(create_type("array", [create_type("number")]));
   });
 });
 
@@ -175,9 +180,9 @@ describe("pass state isolation", () => {
     const a = new TypecheckContext();
     const b = new TypecheckContext();
 
-    a.aliases.declare(token("Pos"), null, new TypeConcreteNode(token("int")));
+    a.aliases.declare(token("Pos"), null, new TypeConcreteNode(token("number")));
 
-    expect(a.aliases.resolve("Pos")).toEqual({ kind: "complete", term: create_type("int") });
+    expect(a.aliases.resolve("Pos")).toEqual({ kind: "complete", term: create_type("number") });
 
     expect(() => b.aliases.resolve("Pos")).toThrow(TypeCheckError);
   });

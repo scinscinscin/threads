@@ -5,7 +5,7 @@ import { BaseNode } from "./base";
 
 /**
  * A type annotation as parsed from source. The concrete subclasses mirror the
- * grammar's type expressions (`int`, `Promise<int>`, `int[]`, `(int, str) =>
+ * grammar's type expressions (`number`, `Promise<number>`, `number[]`, `(number, str) =>
  * bool`); each lowers itself to a static `Term` via `lower`, so unknown type
  * names become positioned type errors at typecheck time.
  */
@@ -17,7 +17,7 @@ export abstract class TypeExpressionNode extends BaseNode {
   abstract lower(ctx: TypecheckContext): Term;
 }
 
-/** A bare type name: `int`, `str`, ... A bare parametric name (no `<...>`) is a type error. */
+/** A bare type name: `number`, `str`, ... A bare parametric name (no `<...>`) is a type error. */
 export class TypeConcreteNode extends TypeExpressionNode {
   constructor(public readonly name: Token) {
     super();
@@ -35,7 +35,7 @@ export class TypeConcreteNode extends TypeExpressionNode {
   }
 }
 
-/** A parametric type with its type arguments: `Promise<int>`. */
+/** A parametric type with its type arguments: `Promise<number>`. */
 export class TypeParametricNode extends TypeExpressionNode {
   constructor(
     public readonly name: Token,
@@ -67,7 +67,7 @@ export class TypeParametricNode extends TypeExpressionNode {
   }
 }
 
-/** An array type: `int[]`. */
+/** An array type: `number[]`. */
 export class TypeArrayNode extends TypeExpressionNode {
   constructor(public readonly inner: TypeExpressionNode) {
     super();
@@ -78,7 +78,7 @@ export class TypeArrayNode extends TypeExpressionNode {
   }
 }
 
-/** A function type: `(int, str) => bool`. */
+/** A function type: `(number, str) => bool`. */
 export class TypeFunctionNode extends TypeExpressionNode {
   constructor(
     public readonly params: TypeExpressionNode[],
@@ -102,7 +102,7 @@ export class TypePropertyNode extends BaseNode {
   }
 }
 
-/** An object type annotation: `{a: int; b: str}`. Fields are `;`-delimited,
+/** An object type annotation: `{a: number; b: str}`. Fields are `;`-delimited,
  *  keys are identifiers or string literals, and a field may not appear twice. */
 export class TypeObjectNode extends TypeExpressionNode {
   constructor(public readonly properties: TypePropertyNode[]) {

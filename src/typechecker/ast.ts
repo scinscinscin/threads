@@ -1,5 +1,5 @@
-/** The term encoding used by the type system: atoms (type names like `int`),
- *  type variables, and compounds (`promise(int)`, `f(p, R)`, `obj(key(T), ...)`). */
+/** The term encoding used by the type system: atoms (type names like `number`),
+ *  type variables, and compounds (`promise(number)`, `f(p, R)`, `obj(key(T), ...)`). */
 
 export type Term = Atom | Var | Compound;
 export type Atom = { kind: "atom"; name: string };
